@@ -23,15 +23,23 @@ pub fn find_function_index(WasmModule, String) -> UInt32?
 
 pub fn format_val_type(ValType) -> String
 
-pub fn opt_config(level? : OptLevel, converge? : Bool, max_rounds? : Int32, strip_custom? : Bool, keep_names? : Bool, enable_inline? : Bool?) -> OptConfig
+pub fn opt_config(level? : OptLevel, converge? : Bool, max_rounds? : Int32, strip_custom? : Bool, keep_names? : Bool, enable_inline? : Bool?, enable_coalesce? : Bool?, enable_dae? : Bool?) -> OptConfig
 
 pub fn optimize_bytes(Bytes, config? : OptConfig) -> (Bytes, OptReport) raise WasmError
 
+pub fn pass_coalesce_locals(WasmModule) -> WasmModule
+
 pub fn pass_const_globals(WasmModule, prefer_speed? : Bool) -> WasmModule
+
+pub fn pass_dae(WasmModule) -> WasmModule
 
 pub fn pass_dce_instr(WasmModule) -> WasmModule
 
+pub fn pass_dedup_types(WasmModule) -> WasmModule
+
 pub fn pass_inline(WasmModule, prefer_speed? : Bool, max_multi_instrs? : Int32, max_single_instrs? : Int32) -> WasmModule
+
+pub fn pass_local_dse(WasmModule) -> WasmModule
 
 pub fn pass_local_opt(WasmModule) -> WasmModule
 
@@ -46,6 +54,8 @@ pub fn pass_peephole(WasmModule) -> WasmModule
 pub fn pass_simplify_cfg(WasmModule) -> WasmModule
 
 pub fn pass_strip_custom(WasmModule, keep_names? : Bool) -> WasmModule
+
+pub fn pass_wasmgc_opt(WasmModule) -> WasmModule
 
 pub fn rebuild_name_custom_section(WasmModule) -> Array[CustomSection]
 
@@ -431,11 +441,16 @@ pub(all) struct OptConfig {
   max_rounds : Int32
   strip_custom : Bool
   keep_names : Bool
+  enable_dedup_types : Bool
   enable_const_globals : Bool
+  enable_dae : Bool
   enable_inline : Bool
   enable_dce : Bool
   enable_peephole : Bool
+  enable_wasmgc : Bool
   enable_simplify_cfg : Bool
+  enable_liveness : Bool
+  enable_coalesce : Bool
   enable_locals : Bool
   enable_module_dce : Bool
   enable_icf : Bool

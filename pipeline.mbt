@@ -26,11 +26,16 @@ pub(all) struct OptConfig {
   max_rounds : Int32
   strip_custom : Bool
   keep_names : Bool
+  enable_dedup_types : Bool
   enable_const_globals : Bool
+  enable_dae : Bool
   enable_inline : Bool
   enable_dce : Bool
   enable_peephole : Bool
+  enable_wasmgc : Bool
   enable_simplify_cfg : Bool
+  enable_liveness : Bool
+  enable_coalesce : Bool
   enable_locals : Bool
   enable_module_dce : Bool
   enable_icf : Bool
@@ -55,6 +60,8 @@ pub fn opt_config(
   strip_custom~ : Bool = true,
   keep_names~ : Bool = false,
   enable_inline~ : Bool? = None,
+  enable_coalesce~ : Bool? = None,
+  enable_dae~ : Bool? = None,
 ) -> OptConfig {
   match level {
     O1 =>
@@ -64,11 +71,16 @@ pub fn opt_config(
         max_rounds: 1,
         strip_custom: false,
         keep_names: true,
+        enable_dedup_types: false,
         enable_const_globals: true,
+        enable_dae: enable_dae.unwrap_or(false),
         enable_inline: enable_inline.unwrap_or(false),
         enable_dce: true,
         enable_peephole: true,
+        enable_wasmgc: true,
         enable_simplify_cfg: true,
+        enable_liveness: true,
+        enable_coalesce: enable_coalesce.unwrap_or(false),
         enable_locals: false,
         enable_module_dce: false,
         enable_icf: false,
@@ -81,11 +93,16 @@ pub fn opt_config(
         max_rounds,
         strip_custom,
         keep_names,
+        enable_dedup_types: true,
         enable_const_globals: true,
+        enable_dae: enable_dae.unwrap_or(true),
         enable_inline: enable_inline.unwrap_or(true),
         enable_dce: true,
         enable_peephole: true,
+        enable_wasmgc: true,
         enable_simplify_cfg: true,
+        enable_liveness: true,
+        enable_coalesce: enable_coalesce.unwrap_or(true),
         enable_locals: true,
         enable_module_dce: true,
         enable_icf: false,
@@ -98,11 +115,16 @@ pub fn opt_config(
         max_rounds,
         strip_custom,
         keep_names,
+        enable_dedup_types: true,
         enable_const_globals: true,
+        enable_dae: enable_dae.unwrap_or(true),
         enable_inline: enable_inline.unwrap_or(true),
         enable_dce: true,
         enable_peephole: true,
+        enable_wasmgc: true,
         enable_simplify_cfg: true,
+        enable_liveness: true,
+        enable_coalesce: enable_coalesce.unwrap_or(true),
         enable_locals: true,
         enable_module_dce: true,
         enable_icf: true,
@@ -260,6 +282,11 @@ pub fn optimize_bytes(
     rounds_run = round
     let round_start_len = cur_len
     let mut any_change = false
+    if config.enable_dedup_types {
+      if run_pass("dedup-types", round, pass_dedup_types) {
+        any_change = true
+      }
+    }
     if config.enable_const_globals {
       if run_pass("const-globals", round, m => {
           pass_const_globals(m, prefer_speed~)
@@ -267,8 +294,18 @@ pub fn optimize_bytes(
         any_change = true
       }
     }
+    if config.enable_dae {
+      if run_pass("dae", round, pass_dae) {
+        any_change = true
+      }
+    }
     if config.enable_peephole {
       if run_pass("const-fold+peephole", round, pass_peephole) {
+        any_change = true
+      }
+    }
+    if config.enable_wasmgc {
+      if run_pass("wasmgc-opt", round, pass_wasmgc_opt) {
         any_change = true
       }
     }
@@ -280,6 +317,22 @@ pub fn optimize_bytes(
     if config.enable_dce {
       if run_pass("dce-instr", round, pass_dce_instr) {
         any_change = true
+      }
+    }
+    if config.enable_liveness {
+      if run_pass("local-dse", round, pass_local_dse) {
+        any_change = true
+        if config.enable_peephole {
+          ignore(run_pass("const-fold+peephole", round, pass_peephole))
+        }
+      }
+    }
+    if config.enable_coalesce {
+      if run_pass("coalesce-locals", round, pass_coalesce_locals) {
+        any_change = true
+        if config.enable_peephole {
+          ignore(run_pass("const-fold+peephole", round, pass_peephole))
+        }
       }
     }
     if config.enable_locals {
@@ -311,11 +364,17 @@ pub fn optimize_bytes(
         if config.enable_peephole {
           ignore(run_pass("const-fold+peephole", round, pass_peephole))
         }
+        if config.enable_wasmgc {
+          ignore(run_pass("wasmgc-opt", round, pass_wasmgc_opt))
+        }
         if config.enable_simplify_cfg {
           ignore(run_pass("simplify-cfg", round, pass_simplify_cfg))
         }
         if config.enable_dce {
           ignore(run_pass("dce-instr", round, pass_dce_instr))
+        }
+        if config.enable_liveness {
+          ignore(run_pass("local-dse", round, pass_local_dse))
         }
         if config.enable_locals {
           ignore(run_pass("local-opt", round, pass_local_opt))
@@ -424,6 +483,14 @@ pub fn render_opt_waterfall_svg(
         "#8b5cf6"
       } else if p.name.contains("module-dce") {
         "#0ea5e9"
+      } else if p.name.contains("coalesce") {
+        "#2563eb"
+      } else if p.name.contains("local-dse") {
+        "#0284c7"
+      } else if p.name.contains("wasmgc") || p.name.contains("dedup-types") {
+        "#7c3aed"
+      } else if p.name == "dae" {
+        "#d946ef"
       } else if p.name.contains("inline") {
         "#ec4899"
       } else if p.name.contains("simplify-cfg") {

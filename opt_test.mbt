@@ -105,9 +105,8 @@ test "peephole, dce-instr, local-opt, module-dce, and ICF shrink redundant Wasm 
   assert_eq(decoded.exports[1].idx, 0U)
   // Unused global 0 was eliminated
   assert_eq(decoded.globals.length(), 0)
-  // Unused i64 local was eliminated, only 1 i32 local remains
-  assert_eq(decoded.codes[0].locals.length(), 1)
-  assert_eq(decoded.codes[0].locals[0].val_type, I32)
+  // Unused i64 local AND dead-tee i32 local were both eliminated by local-dse + local-opt -> 0 locals remain!
+  assert_eq(decoded.codes[0].locals.length(), 0)
 
   let wf = @moon-wasm-opt.render_opt_waterfall_svg(report)
   assert_true(wf.contains("moon-wasm-waterfall"))

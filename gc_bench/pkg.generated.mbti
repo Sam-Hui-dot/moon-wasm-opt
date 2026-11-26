@@ -1,0 +1,13 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "Sam-Hui-dot/moon-wasm-opt/gc_bench"
+
+// Values
+pub fn self_opt_checksum(Int32) -> Int32
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits

@@ -2,7 +2,7 @@
 let usage : String =
   #|moon-wasm-opt inspect <FILE.wasm> [--top-k N] [--format text|json|md|svg] [--out FILE]
   #|moon-wasm-opt disasm <FILE.wasm> --func <IDX_OR_NAME> [--out FILE]
-  #|moon-wasm-opt opt <IN.wasm> --out <OUT.wasm> [-O1|-O2|-Os|-Oz] [--no-converge] [--keep-names] [--keep-custom] [--report-format text|json|md|svg] [--report-out FILE]
+  #|moon-wasm-opt opt <IN.wasm> --out <OUT.wasm> [-O1|-O2|-Os|-Oz] [--no-converge] [--no-inline] [--keep-names] [--keep-custom] [--report-format text|json|md|svg] [--report-out FILE]
   #|moon-wasm-opt diff <BEFORE.wasm> <AFTER.wasm> [--top-k N] [--format text|json|md] [--out FILE]
   #|moon-wasm-opt roundtrip <IN.wasm> --out <OUT.wasm>
 
@@ -132,6 +132,7 @@ async fn cmd_opt(args : Array[String]) -> Int32 {
   let mut out_path : String? = None
   let mut level : @moon-wasm-opt.OptLevel = Oz
   let mut converge = true
+  let mut enable_inline : Bool? = None
   let mut strip_custom = true
   let mut keep_names = false
   let mut report_format = "text"
@@ -167,6 +168,10 @@ async fn cmd_opt(args : Array[String]) -> Int32 {
         converge = false
         i += 1
       }
+      "--no-inline" => {
+        enable_inline = Some(false)
+        i += 1
+      }
       "--keep-names" => {
         keep_names = true
         i += 1
@@ -196,6 +201,7 @@ async fn cmd_opt(args : Array[String]) -> Int32 {
     converge~,
     strip_custom~,
     keep_names~,
+    enable_inline~,
   )
   let (opt_bytes, report) = @moon-wasm-opt.optimize_bytes(raw, config=cfg)
   @fs.write_file(dest, opt_bytes, create_mode=CreateOrTruncate)

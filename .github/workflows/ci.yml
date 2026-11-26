@@ -25,11 +25,16 @@ jobs:
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
-      - name: Install Binaryen (wasm-opt) for head-to-head oracle comparison
+      - name: Install Binaryen (wasm-opt) and Bytecode Alliance wasm-tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq binaryen
-          wasm-opt --version || true
+          wasm-opt --version
+          WT_VER="1.227.1"
+          curl -fsSL "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WT_VER}/wasm-tools-${WT_VER}-x86_64-linux.tar.gz" -o /tmp/wasm-tools.tar.gz
+          tar -xzf /tmp/wasm-tools.tar.gz -C /tmp
+          sudo mv "/tmp/wasm-tools-${WT_VER}-x86_64-linux/wasm-tools" /usr/local/bin/wasm-tools
+          wasm-tools --version
       - name: Format, multi-target check, unit tests, fuzzing, and native build
         run: |
           moon version --all
@@ -41,19 +46,20 @@ jobs:
             moon test --target "$target" --deny-warn
           done
           moon build --target wasm --deny-warn cmd/main
+          moon build --target wasm-gc --release --deny-warn gc_bench
           moon build --target native --release --deny-warn cmd/main
       - name: Verify root library from an independent consumer module
         run: |
           WS="$RUNNER_TEMP/moon-wasm-opt-consumer"
           mkdir -p "$WS/library" "$WS/consumer"
-          cp moon.mod moon.pkg types.mbt leb128.mbt decoder.mbt encoder.mbt wat.mbt analyze.mbt opt_peephole.mbt opt_locals.mbt opt_module.mbt opt_icf.mbt pipeline.mbt "$WS/library/"
+          cp moon.mod moon.pkg types.mbt leb128.mbt decoder.mbt encoder.mbt wat.mbt analyze.mbt opt_peephole.mbt opt_locals.mbt opt_module.mbt opt_icf.mbt opt_globals.mbt opt_data.mbt opt_cfg.mbt opt_inline.mbt pipeline.mbt "$WS/library/"
           printf 'members = ["library", "consumer"]\n' > "$WS/moon.work"
           cat > "$WS/consumer/moon.mod" << 'EOF'
           name = "consumer/wasm-opt-check"
-          version = "0.1.0"
+          version = "0.2.0"
 
           import {
-            "Sam-Hui-dot/moon-wasm-opt@0.1.0",
+            "Sam-Hui-dot/moon-wasm-opt@0.2.0",
           }
           EOF
           cat > "$WS/consumer/moon.pkg" << 'EOF'
@@ -77,18 +83,18 @@ jobs:
               imports: [],
               func_types: [0U, 0U],
               tables: [],
-              memories: [],
+              memories: [{ flags: b'\x00', min: 1UL, max: None }],
               tags: [],
-              globals: [],
+              globals: [{ global_type: { val_type: I32, mutable: false }, init: [I32Const(5)] }],
               exports: [{ name: "f", kind: Func, idx: 0U }],
               start_func: None,
               elements: [],
               has_data_count: false,
               codes: [
+                { locals: [], body: [LocalGet(0U), Call(1U), GlobalGet(0U), NumOp(b'\x6A')] },
                 { locals: [], body: [LocalGet(0U), I32Const(0), NumOp(b'\x6A')] },
-                { locals: [], body: [LocalGet(0U)] },
               ],
-              datas: [],
+              datas: [{ flags: 0U, mem_idx: 0U, offset: Some([I32Const(0)]), data: b"\x00\x00\x01\x02\x00\x00" }],
               custom_sections: [],
               module_name: "",
               func_names: Map([]),
@@ -110,7 +116,7 @@ jobs:
       - name: Build and smoke-test zero-upload browser playground bundle
         run: |
           python3 demo/build_web.py
-      - name: Run V8 validation, runtime equivalence oracle, and Binaryen comparison
+      - name: Run V8 validation, wasm-tools validate, runtime equivalence oracle, and Binaryen comparison
         run: |
           python3 demo/verify_oracle.py
           cat demo/out/oracle-summary.md >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,10 @@
+import {
+  "Sam-Hui-dot/moon-wasm-opt" @wopt,
+}
+
+options(
+  link: {
+    "wasm": { "exports": [ "self_opt_checksum" ] },
+    "wasm-gc": { "exports": [ "self_opt_checksum" ] },
+  },
+)

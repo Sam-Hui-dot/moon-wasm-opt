@@ -26,6 +26,7 @@ def main() -> None:
     sample_map = {
         "kernel_wasm": "moonbit-kernel-wasm.wasm",
         "kernel_wasmgc": "moonbit-kernel-wasmgc.wasm",
+        "self_lib_wasmgc": "moonbit-self-lib-wasmgc.wasm",
         "self_cli_wasm": "moonbit-self-cli-wasm.wasm",
     }
     encoded = {}

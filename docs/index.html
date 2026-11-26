@@ -58,12 +58,13 @@
         <span class="pill pill-fmt" id="fmt-badge" style="display:none"></span>
         <span class="pill" id="v8-badge" style="display:none"></span>
       </h1>
-      <div class="sub">Pure-MoonBit WebAssembly 2.0 &amp; WasmGC binary optimizer: Peephole &amp; Const-Fold, DCE, Local Compaction, Module Reachability GC, ICF Function Merging &amp; Live <code>WebAssembly.validate()</code>.</div>
+      <div class="sub">Pure-MoonBit WebAssembly 2.0 &amp; WasmGC 10-pass binary optimizer: Const-Globals, Size-Aware Inlining, Peephole &amp; Const-Fold, SimplifyCFG, DCE, Local Compaction, Module Reachability GC, ICF Function Merging, Active Data Zero-Trimming &amp; Live <code>WebAssembly.validate()</code>.</div>
     </div>
     <div class="row">
-      <button id="demo-self-cli" class="primary">Self-Optimize moon-wasm-opt (383 KB)</button>
-      <button id="demo-kernel-wasm">MoonBit Kernel (Linear Wasm)</button>
-      <button id="demo-kernel-gc">MoonBit Kernel (WasmGC)</button>
+      <button id="demo-self-cli" class="primary">Self-Optimize CLI (Linear Wasm, 419 KB)</button>
+      <button id="demo-self-gc">Self-Optimize Lib (WasmGC, 205 KB)</button>
+      <button id="demo-kernel-wasm">Kernel (Linear Wasm)</button>
+      <button id="demo-kernel-gc">Kernel (WasmGC)</button>
     </div>
   </header>
 
@@ -327,12 +328,13 @@
     runOptimize();
   }
 
-  $("demo-self-cli").addEventListener("click", () => loadDemo("self_cli_wasm", "moonbit-self-cli-wasm.wasm (moon-wasm-opt --release optimizing itself)"));
+  $("demo-self-cli").addEventListener("click", () => loadDemo("self_cli_wasm", "moonbit-self-cli-wasm.wasm (moon-wasm-opt --release Linear Wasm)"));
+  $("demo-self-gc").addEventListener("click", () => loadDemo("self_lib_wasmgc", "moonbit-self-lib-wasmgc.wasm (moon-wasm-opt --release WasmGC)"));
   $("demo-kernel-wasm").addEventListener("click", () => loadDemo("kernel_wasm", "moonbit-kernel-wasm.wasm (MoonBit --release Linear Wasm)"));
   $("demo-kernel-gc").addEventListener("click", () => loadDemo("kernel_wasmgc", "moonbit-kernel-wasmgc.wasm (MoonBit --release WasmGC)"));
 
   if(globalThis.MoonWasmOpt && globalThis.MOON_WASM_OPT_SAMPLES){
-    loadDemo("self_cli_wasm", "moonbit-self-cli-wasm.wasm (moon-wasm-opt --release optimizing itself)");
+    loadDemo("self_cli_wasm", "moonbit-self-cli-wasm.wasm (moon-wasm-opt --release Linear Wasm)");
   }
 })();
 </script>

@@ -196,8 +196,12 @@ def main():
                 b_pct = round((rep["before_bytes"] - b_sz) * 100.0 / rep["before_bytes"], 2)
                 bin_col = f"{b_sz} (-{b_pct}%, {b_ms:.0f} ms)"
             else:
-                print(f"[WARN] Binaryen wasm-opt returned {b_res.returncode} on {fname}: {b_res.stderr.strip()}")
-                bin_col = f"err({b_res.returncode})"
+                err_msg = b_res.stderr.strip()
+                print(f"[WARN] Binaryen wasm-opt returned {b_res.returncode} on {fname}: {err_msg}")
+                if "control flow inputs" in err_msg:
+                    bin_col = "unsupported (block inputs)"
+                else:
+                    bin_col = f"err({b_res.returncode})"
 
         fmt = "WasmGC" if rep["is_wasmgc"] else "Linear Wasm"
         print(

@@ -1,0 +1,116 @@
+name: CI
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MOON_WORK: 'off'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install MoonBit toolchain
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Install Binaryen (wasm-opt) for head-to-head oracle comparison
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binaryen
+          wasm-opt --version || true
+      - name: Format, multi-target check, unit tests, fuzzing, and native build
+        run: |
+          moon version --all
+          moon update
+          moon fmt --check
+          for target in wasm wasm-gc js native; do
+            echo "=== target: $target ==="
+            moon check --target "$target" --deny-warn
+            moon test --target "$target" --deny-warn
+          done
+          moon build --target wasm --deny-warn cmd/main
+          moon build --target native --release --deny-warn cmd/main
+      - name: Verify root library from an independent consumer module
+        run: |
+          WS="$RUNNER_TEMP/moon-wasm-opt-consumer"
+          mkdir -p "$WS/library" "$WS/consumer"
+          cp moon.mod moon.pkg types.mbt leb128.mbt decoder.mbt encoder.mbt wat.mbt analyze.mbt opt_peephole.mbt opt_locals.mbt opt_module.mbt opt_icf.mbt pipeline.mbt "$WS/library/"
+          printf 'members = ["library", "consumer"]\n' > "$WS/moon.work"
+          cat > "$WS/consumer/moon.mod" << 'EOF'
+          name = "consumer/wasm-opt-check"
+          version = "0.1.0"
+
+          import {
+            "Sam-Hui-dot/moon-wasm-opt@0.1.0",
+          }
+          EOF
+          cat > "$WS/consumer/moon.pkg" << 'EOF'
+          import {
+            "Sam-Hui-dot/moon-wasm-opt" @wopt,
+          }
+          pkgtype(kind: "executable")
+          EOF
+          cat > "$WS/consumer/main.mbt" << 'EOF'
+          fn main raise {
+            let m : @wopt.WasmModule = {
+              type_groups: [{
+                explicit_rec: false,
+                subtypes: [{
+                  is_final: true,
+                  explicit_sub: false,
+                  supers: [],
+                  comp: Func([I32], [I32]),
+                }],
+              }],
+              imports: [],
+              func_types: [0U, 0U],
+              tables: [],
+              memories: [],
+              tags: [],
+              globals: [],
+              exports: [{ name: "f", kind: Func, idx: 0U }],
+              start_func: None,
+              elements: [],
+              has_data_count: false,
+              codes: [
+                { locals: [], body: [LocalGet(0U), I32Const(0), NumOp(b'\x6A')] },
+                { locals: [], body: [LocalGet(0U)] },
+              ],
+              datas: [],
+              custom_sections: [],
+              module_name: "",
+              func_names: Map([]),
+            }
+            let raw = @wopt.encode_module(m)
+            let (opt_b, rep) = @wopt.optimize_bytes(raw)
+            guard rep.saved_bytes > 0 && rep.after_funcs == 1 else {
+              abort("unexpected opt result")
+            }
+            let svg = @wopt.render_treemap_svg(@wopt.analyze_module(opt_b))
+            guard svg.contains("moon-wasm-treemap") else {
+              abort("unexpected treemap")
+            }
+            println("consumer: ok")
+          }
+          EOF
+          MOON_WORK="" moon -C "$WS/consumer" run --target js --deny-warn .
+          MOON_WORK="" moon -C "$WS/consumer" run --target wasm --deny-warn .
+      - name: Build and smoke-test zero-upload browser playground bundle
+        run: |
+          python3 demo/build_web.py
+      - name: Run V8 validation, runtime equivalence oracle, and Binaryen comparison
+        run: |
+          python3 demo/verify_oracle.py
+          cat demo/out/oracle-summary.md >> "$GITHUB_STEP_SUMMARY"

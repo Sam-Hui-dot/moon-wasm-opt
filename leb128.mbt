@@ -222,7 +222,7 @@ fn BinWriter::write_byte(self : BinWriter, b : Byte) -> Unit {
 
 ///|
 fn BinWriter::write_bytes(self : BinWriter, bs : Bytes) -> Unit {
-  self.buf.write_bytes(bs)
+  self.buf.write_bytesview(bs[:])
 }
 
 ///|

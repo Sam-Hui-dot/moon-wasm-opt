@@ -29,16 +29,18 @@
   - 函数级可读 WAT 反汇编（自动关联 `name` 段符号名）与优化前后左右对照；
   - 浏览器端零上传执行，内嵌实时原生 `WebAssembly.validate()` 验签与优化产物一键下载。
 
-## 实测验证结果（真实 MoonBit 1.0 `--release` 产物）
+## 实测验证结果（真实 MoonBit 1.0 `--release` 产物，vs C++ Binaryen `v133`）
 
-以下为 4 个真实 MoonBit 1.0 `--release` 产物的本地与 CI 实测结果（全部 100% 通过 Node.js v24 V8 `WebAssembly.validate()` 与 Bytecode Alliance `wasm-tools validate`）：
+以下为 4 个真实 MoonBit 1.0 `--release` 产物在 GitHub Actions Ubuntu CI 上的实测横向对比（全部 100% 通过 Node.js v24 V8 `WebAssembly.validate()` 与 Bytecode Alliance `wasm-tools 1.227.1 validate`）：
 
-| 真实夹具 | 格式 | 原始体积 | `moon-wasm-opt -Oz` | 纯字节码减重 | 函数数变化 | V8 + `wasm-tools` | 运行时对拍 |
-| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
-| `moonbit-self-cli-wasm.wasm`（自身 CLI `--release`） | Linear Wasm | 419,023 B | **363,945 B** | **-55,078 B (-13.14%)** | 1,446 → 976 | PASS | WASI CLI |
-| `moonbit-self-lib-wasmgc.wasm`（自身库 `--release` WasmGC 自举） | WasmGC | 204,727 B | **189,922 B** | **-14,805 B (-7.23%)** | 857 → 671 | PASS | **5/5 self-exec exact** |
-| `moonbit-kernel-wasm.wasm` | Linear Wasm | 10,285 B | **9,728 B** | **-557 B (-5.42%)** | 94 → 64 | PASS | **32/32 exact (含 NaN)** |
-| `moonbit-kernel-wasmgc.wasm` | WasmGC | 5,988 B | **5,651 B** | **-337 B (-5.63%)** | 60 → 43 | PASS | **32/32 exact (含 NaN)** |
+| 真实夹具 | 格式 | 原始体积 | `moon-wasm-opt -Oz` | 耗时 | 函数数变化 | Binaryen `v133 -Oz`（参考） | V8 + `wasm-tools` | 运行时对拍 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| `moonbit-self-cli-wasm.wasm`（自身 CLI `--release`） | Linear Wasm | 419,023 B | **363,945 B (-13.14%)** | **561 ms** | 1,446 → 976 | 286,276 B (-31.68%, 876 ms) | PASS / PASS | WASI CLI |
+| `moonbit-self-lib-wasmgc.wasm`（自身库 `--release` WasmGC 自举） | WasmGC | 204,727 B | **189,922 B (-7.23%)** | **372 ms** | 857 → 671 | 150,180 B (-26.64%, 634 ms) | PASS / PASS | **5/5 self-exec exact** |
+| `moonbit-kernel-wasm.wasm` | Linear Wasm | 10,285 B | **9,728 B (-5.42%)** | **12 ms** | 94 → 64 | 6,928 B (-32.64%, 47 ms) | PASS / PASS | **32/32 exact (含 NaN)** |
+| `moonbit-kernel-wasmgc.wasm` | WasmGC | 5,988 B | **5,651 B (-5.63%)** | **7 ms** | 60 → 43 | 4,207 B (-29.74%, 32 ms) | PASS / PASS | **32/32 exact (含 NaN)** |
+
+> 说明：C++ Binaryen `v133`（需加 `--all-features` 以支持 MoonBit 1.0 的块参数输入与 WasmGC；Ubuntu apt 默认的 Binaryen `v120` 会在块参数输入处报错无法解析）在深层 IR 优化（活跃区间局部槽位着色、WasmGC 类型合并、死参数裁剪、尾代码折叠）上仍领先 `0.2.0` 约 18–24 个百分点；`moon-wasm-opt@0.2.0` 目前已实现 1.5x–4.5x 更快的运行耗时与零 C++ 依赖浏览器端执行，上述体积差距将在 `0.3.0`–`0.5.0` 中逐项补齐。
 
 ## 快速使用
 

@@ -26,11 +26,15 @@ pub(all) struct OptConfig {
   max_rounds : Int32
   strip_custom : Bool
   keep_names : Bool
+  enable_const_globals : Bool
+  enable_inline : Bool
   enable_dce : Bool
   enable_peephole : Bool
+  enable_simplify_cfg : Bool
   enable_locals : Bool
   enable_module_dce : Bool
   enable_icf : Bool
+  enable_opt_data : Bool
 }
 
 ///|
@@ -50,6 +54,7 @@ pub fn opt_config(
   max_rounds~ : Int32 = 8,
   strip_custom~ : Bool = true,
   keep_names~ : Bool = false,
+  enable_inline~ : Bool? = None,
 ) -> OptConfig {
   match level {
     O1 =>
@@ -59,11 +64,15 @@ pub fn opt_config(
         max_rounds: 1,
         strip_custom: false,
         keep_names: true,
+        enable_const_globals: true,
+        enable_inline: enable_inline.unwrap_or(false),
         enable_dce: true,
         enable_peephole: true,
+        enable_simplify_cfg: true,
         enable_locals: false,
         enable_module_dce: false,
         enable_icf: false,
+        enable_opt_data: false,
       }
     O2 =>
       {
@@ -72,11 +81,15 @@ pub fn opt_config(
         max_rounds,
         strip_custom,
         keep_names,
+        enable_const_globals: true,
+        enable_inline: enable_inline.unwrap_or(true),
         enable_dce: true,
         enable_peephole: true,
+        enable_simplify_cfg: true,
         enable_locals: true,
         enable_module_dce: true,
         enable_icf: false,
+        enable_opt_data: true,
       }
     Os | Oz =>
       {
@@ -85,11 +98,15 @@ pub fn opt_config(
         max_rounds,
         strip_custom,
         keep_names,
+        enable_const_globals: true,
+        enable_inline: enable_inline.unwrap_or(true),
         enable_dce: true,
         enable_peephole: true,
+        enable_simplify_cfg: true,
         enable_locals: true,
         enable_module_dce: true,
         enable_icf: true,
+        enable_opt_data: true,
       }
   }
 }
@@ -234,12 +251,29 @@ pub fn optimize_bytes(
   }
 
   let mut rounds_run = 0
+  let prefer_speed = config.level == O2
+  let (multi_limit, single_limit) = match config.level {
+    O2 => (14, 96)
+    _ => (6, 80)
+  }
   for round in 1..<=limit {
     rounds_run = round
     let round_start_len = cur_len
     let mut any_change = false
+    if config.enable_const_globals {
+      if run_pass("const-globals", round, m => {
+          pass_const_globals(m, prefer_speed~)
+        }) {
+        any_change = true
+      }
+    }
     if config.enable_peephole {
       if run_pass("const-fold+peephole", round, pass_peephole) {
+        any_change = true
+      }
+    }
+    if config.enable_simplify_cfg {
+      if run_pass("simplify-cfg", round, pass_simplify_cfg) {
         any_change = true
       }
     }
@@ -260,6 +294,39 @@ pub fn optimize_bytes(
     }
     if config.enable_icf {
       if run_pass("merge-funcs (ICF)", round, pass_merge_funcs) {
+        any_change = true
+      }
+    }
+    // Inline AFTER ICF so identical single-use helpers merge before being inlined, then immediately clean up dead callees
+    if config.enable_inline {
+      if run_pass("inline", round, m => {
+          pass_inline(
+            m,
+            prefer_speed~,
+            max_multi_instrs=multi_limit,
+            max_single_instrs=single_limit,
+          )
+        }) {
+        any_change = true
+        if config.enable_peephole {
+          ignore(run_pass("const-fold+peephole", round, pass_peephole))
+        }
+        if config.enable_simplify_cfg {
+          ignore(run_pass("simplify-cfg", round, pass_simplify_cfg))
+        }
+        if config.enable_dce {
+          ignore(run_pass("dce-instr", round, pass_dce_instr))
+        }
+        if config.enable_locals {
+          ignore(run_pass("local-opt", round, pass_local_opt))
+        }
+        if config.enable_module_dce {
+          ignore(run_pass("module-dce", round, pass_module_dce))
+        }
+      }
+    }
+    if config.enable_opt_data {
+      if run_pass("opt-data", round, m => pass_opt_data(m, allow_split=true)) {
         any_change = true
       }
     }
@@ -357,6 +424,14 @@ pub fn render_opt_waterfall_svg(
         "#8b5cf6"
       } else if p.name.contains("module-dce") {
         "#0ea5e9"
+      } else if p.name.contains("inline") {
+        "#ec4899"
+      } else if p.name.contains("simplify-cfg") {
+        "#f97316"
+      } else if p.name.contains("opt-data") {
+        "#14b8a6"
+      } else if p.name.contains("const-globals") {
+        "#6366f1"
       } else if p.name.contains("peephole") {
         "#f59e0b"
       } else {

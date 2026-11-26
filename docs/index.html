@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>moon-wasm-opt — Pure-MoonBit Wasm 2.0 &amp; WasmGC Optimizer (Zero Upload)</title>
+<style>
+  :root { --bg:#f4f6f9; --card:#ffffff; --border:#e2e8f0; --text:#0f172a; --muted:#475569; --accent:#0f172a; --ok:#047857; --ok-bg:#ecfdf5; --err:#b91c1c; --hi:#2563eb; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:20px; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  .wrap { max-width:1380px; margin:0 auto; }
+  header { display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:12px; margin-bottom:14px; }
+  h1 { margin:0; font-size:22px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .sub { font-size:13px; color:var(--muted); margin-top:4px; }
+  .pill { display:inline-block; padding:3px 9px; border-radius:999px; font-size:11px; font-weight:600; background:var(--ok-bg); color:var(--ok); border:1px solid #a7f3d0; }
+  .pill-fmt { background:#eef2ff; color:#3730a3; border-color:#c7d2fe; }
+  .pill-err { background:#fef2f2; color:var(--err); border-color:#fecaca; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:14px; box-shadow:0 1px 2px rgba(0,0,0,0.03); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .drop { border:2px dashed #cbd5e1; border-radius:8px; padding:14px; text-align:center; background:#f8fafc; cursor:pointer; transition:border-color .15s,background .15s; margin-bottom:10px; }
+  .drop.drag { border-color:var(--hi); background:#eff6ff; }
+  .drop strong { display:block; font-size:13px; margin-bottom:3px; }
+  .drop span { font-size:12px; color:var(--muted); }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(175px,1fr)); gap:10px; margin-bottom:14px; }
+  .stat { background:#f8fafc; border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
+  .stat .k { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+  .stat .v { font-size:18px; font-weight:700; margin-top:2px; font-family:ui-monospace,Consolas,monospace; }
+  .stat .v.ok { color:var(--ok); }
+  input[type=text], select { padding:6px 9px; border:1px solid #cbd5e1; border-radius:6px; font-size:13px; font-family:ui-monospace,Consolas,monospace; }
+  button { padding:6px 12px; border:1px solid #cbd5e1; border-radius:6px; background:#fff; color:var(--text); cursor:pointer; font-size:13px; }
+  button:hover { background:#f8fafc; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.primary:hover { background:#1e293b; }
+  button.tab.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .status { font-size:12px; color:var(--muted); margin-top:8px; font-family:ui-monospace,Consolas,monospace; }
+  .status.err { color:var(--err); font-weight:600; }
+  .viz { overflow-x:auto; border:1px solid var(--border); border-radius:8px; background:#f8fafc; padding:8px; }
+  .tm-tile { cursor:pointer; }
+  .tm-tile:hover rect { stroke:#0f172a; stroke-width:1.8; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:860px){ .grid2 { grid-template-columns:1fr; } }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--border); }
+  th { background:#f8fafc; font-weight:600; }
+  code { font-family:ui-monospace,Consolas,monospace; font-size:12px; }
+  pre { background:#f8fafc; border:1px solid var(--border); border-radius:6px; padding:12px; overflow:auto; font-size:12px; max-height:460px; margin:0; }
+  .tag-elim { color:#7c3aed; font-weight:600; }
+  .tag-shrunk { color:var(--ok); font-weight:600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>
+        moon-wasm-opt
+        <span class="pill">100% Client-Side / Zero Upload</span>
+        <span class="pill pill-fmt" id="fmt-badge" style="display:none"></span>
+        <span class="pill" id="v8-badge" style="display:none"></span>
+      </h1>
+      <div class="sub">Pure-MoonBit WebAssembly 2.0 &amp; WasmGC binary optimizer: Peephole &amp; Const-Fold, DCE, Local Compaction, Module Reachability GC, ICF Function Merging &amp; Live <code>WebAssembly.validate()</code>.</div>
+    </div>
+    <div class="row">
+      <button id="demo-self-cli" class="primary">Self-Optimize moon-wasm-opt (383 KB)</button>
+      <button id="demo-kernel-wasm">MoonBit Kernel (Linear Wasm)</button>
+      <button id="demo-kernel-gc">MoonBit Kernel (WasmGC)</button>
+    </div>
+  </header>
+
+  <div class="card">
+    <div class="drop" id="drop-zone">
+      <strong>Drop any <code>.wasm</code> or <code>.wasm-gc</code> binary here, or click to select</strong>
+      <span id="file-label">Ready — zero server upload, runs directly in your browser via MoonBit</span>
+      <input id="file-input" type="file" accept=".wasm" style="display:none">
+    </div>
+    <div class="row">
+      <label style="font-size:12px;color:var(--muted)">Preset:</label>
+      <select id="preset">
+        <option value="Oz" selected>-Oz (Max Size + ICF)</option>
+        <option value="Os">-Os (Size + ICF)</option>
+        <option value="O2">-O2 (Standard)</option>
+        <option value="O1">-O1 (Quick Peephole)</option>
+      </select>
+      <label style="font-size:12px"><input id="converge" type="checkbox" checked> --converge</label>
+      <label style="font-size:12px"><input id="strip-custom" type="checkbox" checked> Strip custom sections</label>
+      <label style="font-size:12px"><input id="keep-names" type="checkbox"> Keep name section</label>
+      <button class="primary" id="run-btn">Optimize Now</button>
+      <button id="dl-wasm">Download Optimized .wasm</button>
+    </div>
+    <div class="status" id="status">Loading built-in MoonBit self-optimization demo...</div>
+  </div>
+
+  <div class="card" id="output-card" style="display:none">
+    <div class="stats" id="stats-grid"></div>
+
+    <div class="row" style="margin-bottom:12px;justify-content:space-between">
+      <div class="row">
+        <button class="tab active" data-tab="wf">Pass Waterfall</button>
+        <button class="tab" data-tab="tm">Size Treemap</button>
+        <button class="tab" data-tab="diff">Function Diff</button>
+        <button class="tab" data-tab="wat">WAT Disasm Diff</button>
+        <button class="tab" data-tab="md">Markdown Report</button>
+      </div>
+      <div class="row">
+        <button id="tm-toggle" style="display:none">View: After Optimization</button>
+        <button id="dl-svg">Download SVG</button>
+      </div>
+    </div>
+
+    <div id="tab-wf" class="tab-pane"><div class="viz" id="wf-box"></div></div>
+    <div id="tab-tm" class="tab-pane" style="display:none"><div class="viz" id="tm-box"></div></div>
+    <div id="tab-diff" class="tab-pane" style="display:none"><div id="diff-box"></div></div>
+    <div id="tab-wat" class="tab-pane" style="display:none">
+      <div class="row" style="margin-bottom:10px">
+        <input id="wat-query" type="text" placeholder="Function index or name substring (e.g. 0 or fib)" style="width:300px">
+        <button class="primary" id="wat-btn">Disassemble Before / After</button>
+      </div>
+      <div class="grid2">
+        <div>
+          <h4 style="margin:0 0 6px;font-size:13px" id="wat-before-title">Before Optimization</h4>
+          <pre id="wat-before"></pre>
+        </div>
+        <div>
+          <h4 style="margin:0 0 6px;font-size:13px" id="wat-after-title">After Optimization</h4>
+          <pre id="wat-after"></pre>
+        </div>
+      </div>
+    </div>
+    <div id="tab-md" class="tab-pane" style="display:none"><pre id="md-box"></pre></div>
+  </div>
+</div>
+
+<script src="./moon-wasm-opt.js"></script>
+<script src="./samples.js"></script>
+<script>
+(function(){
+  let inputB64 = "", inputName = "", lastRes = null, currentTab = "wf", showAfterTm = true;
+  const $ = id => document.getElementById(id);
+
+  function setStatus(msg, isErr){
+    const el = $("status");
+    el.textContent = msg;
+    el.className = isErr ? "status err" : "status";
+  }
+
+  function bytesToBase64(buf){
+    const bytes = new Uint8Array(buf);
+    let bin = "";
+    const chunk = 0x8000;
+    for(let i = 0; i < bytes.length; i += chunk){
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(bin);
+  }
+
+  function base64ToBytes(b64){
+    const bin = atob(b64);
+    const arr = new Uint8Array(bin.length);
+    for(let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return arr;
+  }
+
+  function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function fmtB(n){ return Number(n).toLocaleString() + " B"; }
+
+  function switchTab(tabName){
+    currentTab = tabName;
+    document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === tabName));
+    document.querySelectorAll(".tab-pane").forEach(p => p.style.display = (p.id === "tab-" + tabName) ? "" : "none");
+    $("tm-toggle").style.display = (tabName === "tm") ? "" : "none";
+  }
+
+  function bindTreemapClicks(){
+    $("tm-box").querySelectorAll(".tm-tile").forEach(g => {
+      const fidx = parseInt(g.dataset.funcIdx, 10);
+      if(fidx >= 0){
+        g.addEventListener("click", () => {
+          const name = g.dataset.name || String(fidx);
+          $("wat-query").value = name.startsWith("$func") ? String(fidx) : name;
+          runDisasm();
+          switchTab("wat");
+        });
+      }
+    });
+  }
+
+  function renderTreemap(){
+    if(!lastRes) return;
+    $("tm-box").innerHTML = showAfterTm ? lastRes.after_treemap_svg : lastRes.before_treemap_svg;
+    $("tm-toggle").textContent = showAfterTm ? "View: After Optimization" : "View: Before Optimization";
+    bindTreemapClicks();
+  }
+
+  function renderStats(res, validOk, ms){
+    const r = res.report;
+    $("stats-grid").innerHTML =
+      "<div class='stat'><div class='k'>Original Size</div><div class='v'>" + fmtB(r.before_bytes) + "</div></div>" +
+      "<div class='stat'><div class='k'>Optimized Size</div><div class='v ok'>" + fmtB(r.after_bytes) + "</div></div>" +
+      "<div class='stat'><div class='k'>Saved (" + r.rounds + " rounds)</div><div class='v ok'>-" + fmtB(r.saved_bytes) + " (" + r.saved_pct + "%)</div></div>" +
+      "<div class='stat'><div class='k'>Functions</div><div class='v'>" + r.before_funcs + " &rarr; " + r.after_funcs + "</div></div>" +
+      "<div class='stat'><div class='k'>Instructions</div><div class='v'>" + r.before_instrs.toLocaleString() + " &rarr; " + r.after_instrs.toLocaleString() + "</div></div>" +
+      "<div class='stat'><div class='k'>Browser Validate</div><div class='v " + (validOk ? "ok" : "") + "'>" + (validOk ? "VALID (" + ms + " ms)" : "INVALID") + "</div></div>";
+  }
+
+  function renderDiffTable(diff){
+    let html = "<table><thead><tr><th>Function</th><th>Status</th><th>Before</th><th>After</th><th>Delta</th></tr></thead><tbody>";
+    diff.entries.forEach(e => {
+      const cls = e.status === "eliminated" ? "tag-elim" : (e.status === "shrunk" ? "tag-shrunk" : "");
+      html += "<tr><td><code>" + esc(e.name) + "</code></td><td class='" + cls + "'>" + esc(e.status) + "</td><td>" + fmtB(e.before_bytes) + "</td><td>" + fmtB(e.after_bytes) + "</td><td>" + e.delta_bytes + " B</td></tr>";
+    });
+    if(diff.entries.length === 0){
+      html += "<tr><td colspan='5' style='color:#64748b'>All surviving functions kept identical body sizes (savings came from custom sections, types, globals, or ICF merges).</td></tr>";
+    }
+    return html + "</tbody></table>";
+  }
+
+  function runDisasm(){
+    if(!inputB64 || !lastRes) return;
+    const q = $("wat-query").value.trim() || "0";
+    const r1 = globalThis.MoonWasmOpt.disasmFunc(inputB64, q);
+    const r2 = globalThis.MoonWasmOpt.disasmFunc(lastRes.optimized_b64, q);
+    $("wat-before-title").textContent = r1.ok ? ("Before: #" + r1.func_idx + " " + r1.name) : "Before Optimization";
+    $("wat-before").textContent = r1.ok ? r1.wat : ("Not found / " + r1.error);
+    $("wat-after-title").textContent = r2.ok ? ("After: #" + r2.func_idx + " " + r2.name) : "After Optimization";
+    $("wat-after").textContent = r2.ok ? r2.wat : ("Eliminated or merged into another index (" + r2.error + ")");
+  }
+
+  function runOptimize(){
+    if(!globalThis.MoonWasmOpt){ setStatus("moon-wasm-opt.js not loaded. Run python demo/build_web.py.", true); return; }
+    if(!inputB64){ setStatus("Select a .wasm file or click a built-in demo above.", true); return; }
+    const opts = {
+      preset: $("preset").value,
+      converge: $("converge").checked,
+      stripCustom: $("strip-custom").checked,
+      keepNames: $("keep-names").checked
+    };
+    const t0 = performance.now();
+    const res = globalThis.MoonWasmOpt.optimizeWasm(inputB64, opts);
+    const ms = (performance.now() - t0).toFixed(1);
+    if(!res.ok){ setStatus("Optimization error: " + res.error, true); return; }
+    lastRes = res;
+
+    // Live native browser WebAssembly.validate() check on the optimized binary!
+    const optBytes = base64ToBytes(res.optimized_b64);
+    let validOk = false;
+    try { validOk = WebAssembly.validate(optBytes); } catch(_) { validOk = false; }
+
+    const fmtBadge = $("fmt-badge");
+    fmtBadge.textContent = res.report.is_wasmgc ? "Format: WasmGC" : "Format: Linear Wasm 2.0";
+    fmtBadge.style.display = "";
+
+    const v8Badge = $("v8-badge");
+    v8Badge.textContent = validOk ? "WebAssembly.validate(): PASS" : "WebAssembly.validate(): FAIL";
+    v8Badge.className = validOk ? "pill" : "pill pill-err";
+    v8Badge.style.display = "";
+
+    $("output-card").style.display = "";
+    renderStats(res, validOk, ms);
+    $("wf-box").innerHTML = res.waterfall_svg;
+    renderTreemap();
+    $("diff-box").innerHTML = renderDiffTable(res.diff);
+    $("md-box").textContent = res.markdown;
+
+    if(res.after_report.top_functions.length > 0){
+      const topFn = res.after_report.top_functions[0];
+      $("wat-query").value = topFn.name.startsWith("$func") ? String(topFn.func_idx) : topFn.name;
+      runDisasm();
+    }
+    setStatus("Optimized " + inputName + " locally in " + ms + " ms: " + fmtB(res.report.before_bytes) + " -> " + fmtB(res.report.after_bytes) + " (-" + res.report.saved_pct + "%), browser WebAssembly.validate() = " + validOk + ".");
+  }
+
+  const dz = $("drop-zone"), fi = $("file-input");
+  dz.addEventListener("click", () => fi.click());
+  dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("drag"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
+  dz.addEventListener("drop", e => {
+    e.preventDefault(); dz.classList.remove("drag");
+    const f = e.dataTransfer.files[0];
+    if(f){
+      const rd = new FileReader();
+      rd.onload = () => { inputName = f.name; inputB64 = bytesToBase64(rd.result); $("file-label").textContent = "Loaded: " + f.name; runOptimize(); };
+      rd.readAsArrayBuffer(f);
+    }
+  });
+  fi.addEventListener("change", () => {
+    const f = fi.files[0];
+    if(f){
+      const rd = new FileReader();
+      rd.onload = () => { inputName = f.name; inputB64 = bytesToBase64(rd.result); $("file-label").textContent = "Loaded: " + f.name; runOptimize(); };
+      rd.readAsArrayBuffer(f);
+    }
+  });
+
+  $("run-btn").addEventListener("click", runOptimize);
+  $("preset").addEventListener("change", runOptimize);
+  $("tm-toggle").addEventListener("click", () => { showAfterTm = !showAfterTm; renderTreemap(); });
+  $("wat-btn").addEventListener("click", runDisasm);
+  document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
+  $("dl-wasm").addEventListener("click", () => {
+    if(!lastRes) return;
+    const blob = new Blob([base64ToBytes(lastRes.optimized_b64)], { type: "application/wasm" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = (inputName.replace(/\.wasm$/i, "") || "module") + ".opt.wasm";
+    a.click();
+  });
+
+  $("dl-svg").addEventListener("click", () => {
+    if(!lastRes) return;
+    const svg = currentTab === "tm" ? (showAfterTm ? lastRes.after_treemap_svg : lastRes.before_treemap_svg) : lastRes.waterfall_svg;
+    const blob = new Blob([svg], { type: "image/svg+xml" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = currentTab === "tm" ? "moon-wasm-opt-treemap.svg" : "moon-wasm-opt-waterfall.svg";
+    a.click();
+  });
+
+  function loadDemo(key, label){
+    if(!globalThis.MOON_WASM_OPT_SAMPLES || !globalThis.MOON_WASM_OPT_SAMPLES[key]){
+      setStatus("Demo '" + key + "' not loaded. Run python demo/build_web.py.", true);
+      return;
+    }
+    inputName = label;
+    inputB64 = globalThis.MOON_WASM_OPT_SAMPLES[key];
+    $("file-label").textContent = "Demo: " + label;
+    runOptimize();
+  }
+
+  $("demo-self-cli").addEventListener("click", () => loadDemo("self_cli_wasm", "moonbit-self-cli-wasm.wasm (moon-wasm-opt --release optimizing itself)"));
+  $("demo-kernel-wasm").addEventListener("click", () => loadDemo("kernel_wasm", "moonbit-kernel-wasm.wasm (MoonBit --release Linear Wasm)"));
+  $("demo-kernel-gc").addEventListener("click", () => loadDemo("kernel_wasmgc", "moonbit-kernel-wasmgc.wasm (MoonBit --release WasmGC)"));
+
+  if(globalThis.MoonWasmOpt && globalThis.MOON_WASM_OPT_SAMPLES){
+    loadDemo("self_cli_wasm", "moonbit-self-cli-wasm.wasm (moon-wasm-opt --release optimizing itself)");
+  }
+})();
+</script>
+</body>
+</html>

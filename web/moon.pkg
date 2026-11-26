@@ -1,0 +1,9 @@
+import {
+  "moonbitlang/core/buffer",
+  "moonbitlang/core/json",
+  "Sam-Hui-dot/moon-wasm-opt",
+}
+
+supported_targets = "js"
+
+pkgtype(kind: "executable")

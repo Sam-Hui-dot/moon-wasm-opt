@@ -1,0 +1,26 @@
+options(
+  link: {
+    "wasm": {
+      "exports": [
+        "fib",
+        "gcd",
+        "hash_mix",
+        "sum_weighted",
+        "gc_point_score",
+        "dup_calc_a",
+        "dup_calc_b",
+      ],
+    },
+    "wasm-gc": {
+      "exports": [
+        "fib",
+        "gcd",
+        "hash_mix",
+        "sum_weighted",
+        "gc_point_score",
+        "dup_calc_a",
+        "dup_calc_b",
+      ],
+    },
+  },
+)

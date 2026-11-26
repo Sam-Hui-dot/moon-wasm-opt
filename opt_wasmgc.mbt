@@ -336,7 +336,7 @@ fn is_heap_subtype(
     }
     // Concrete <: Concrete via declared `supers` chain
     (Concrete(t), Concrete(target)) => {
-      let visited : Set[UInt32] = Set([])
+      let visited : Map[UInt32, Bool] = Map([])
       let stack : Array[UInt32] = [t]
       let mut steps = 0
       while !stack.is_empty() && steps < 64 {
@@ -348,7 +348,7 @@ fn is_heap_subtype(
         if visited.contains(cur) {
           continue
         }
-        visited.add(cur)
+        visited[cur] = true
         let ci = cur.reinterpret_as_int()
         if ci >= 0 && ci < flat_types.length() {
           for sup_t in flat_types[ci].supers {

@@ -100,20 +100,20 @@ fn body_has_forbidden_inline_ops(
 fn collect_direct_calls_and_refs(
   instrs : Array[Instr],
   call_counts : Map[UInt32, Int32],
-  direct_edges : Set[UInt32],
-  retained : Set[UInt32],
+  direct_edges : Map[UInt32, Bool],
+  retained : Map[UInt32, Bool],
 ) -> Unit {
   for ins in instrs {
     match ins {
       Call(f) => {
         call_counts[f] = call_counts.get(f).unwrap_or(0) + 1
-        direct_edges.add(f)
+        direct_edges[f] = true
       }
       ReturnCall(f) => {
-        retained.add(f)
-        direct_edges.add(f)
+        retained[f] = true
+        direct_edges[f] = true
       }
-      RefFunc(f) => retained.add(f)
+      RefFunc(f) => retained[f] = true
       Block(_, b) | Loop(_, b) | TryTable(_, _, b) =>
         collect_direct_calls_and_refs(b, call_counts, direct_edges, retained)
       If(_, t, e) => {
@@ -128,11 +128,11 @@ fn collect_direct_calls_and_refs(
 ///|
 fn collect_init_ref_funcs(
   instrs : Array[Instr],
-  retained : Set[UInt32],
+  retained : Map[UInt32, Bool],
 ) -> Unit {
   for ins in instrs {
     match ins {
-      RefFunc(f) => retained.add(f)
+      RefFunc(f) => retained[f] = true
       Block(_, b) | Loop(_, b) | TryTable(_, _, b) =>
         collect_init_ref_funcs(b, retained)
       If(_, t, e) => {
@@ -148,9 +148,9 @@ fn collect_init_ref_funcs(
 fn can_reach_caller(
   start : UInt32,
   target : UInt32,
-  call_graph : Map[UInt32, Set[UInt32]],
+  call_graph : Map[UInt32, Map[UInt32, Bool]],
 ) -> Bool {
-  let visited : Set[UInt32] = Set([])
+  let visited : Map[UInt32, Bool] = Map([])
   let stack : Array[UInt32] = [start]
   while !stack.is_empty() {
     let cur = stack.pop().unwrap()
@@ -160,10 +160,10 @@ fn can_reach_caller(
     if visited.contains(cur) {
       continue
     }
-    visited.add(cur)
+    visited[cur] = true
     match call_graph.get(cur) {
       Some(nexts) =>
-        for nx in nexts {
+        for nx, _ in nexts {
           if !visited.contains(nx) {
             stack.push(nx)
           }
@@ -270,16 +270,16 @@ pub fn pass_inline(
 
   // Collect call-site counts, direct call graph, and externally retained functions
   let call_counts : Map[UInt32, Int32] = Map([])
-  let call_graph : Map[UInt32, Set[UInt32]] = Map([])
-  let retained : Set[UInt32] = Set([])
+  let call_graph : Map[UInt32, Map[UInt32, Bool]] = Map([])
+  let retained : Map[UInt32, Bool] = Map([])
 
   for exp in mod.exports {
     if exp.kind == Func {
-      retained.add(exp.idx)
+      retained[exp.idx] = true
     }
   }
   match mod.start_func {
-    Some(f) => retained.add(f)
+    Some(f) => retained[f] = true
     None => ()
   }
   for tt in mod.tables {
@@ -293,7 +293,7 @@ pub fn pass_inline(
   }
   for el in mod.elements {
     for f in el.func_indices {
-      retained.add(f)
+      retained[f] = true
     }
     for ex in el.init_exprs {
       collect_init_ref_funcs(ex, retained)
@@ -301,7 +301,7 @@ pub fn pass_inline(
   }
   for i, fb in mod.codes {
     let fidx = imp_funcs + i.reinterpret_as_uint()
-    let edges : Set[UInt32] = Set([])
+    let edges : Map[UInt32, Bool] = Map([])
     collect_direct_calls_and_refs(fb.body, call_counts, edges, retained)
     call_graph[fidx] = edges
   }

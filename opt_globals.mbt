@@ -104,10 +104,10 @@ pub fn pass_const_globals(
   }
 
   // Track exports and uses inside vs outside function bodies for exact size-aware profitability
-  let exported_globals : Set[UInt32] = Set([])
+  let exported_globals : Map[UInt32, Bool] = Map([])
   for exp in mod.exports {
     if exp.kind == Global {
-      exported_globals.add(exp.idx)
+      exported_globals[exp.idx] = true
     }
   }
 
@@ -190,7 +190,7 @@ pub fn pass_const_globals(
 ///|
 fn replace_write_only_global_sets(
   instrs : Array[Instr],
-  dead_globals : Set[UInt32],
+  dead_globals : Map[UInt32, Bool],
 ) -> Array[Instr] {
   let out : Array[Instr] = []
   let mut changed = false
@@ -247,10 +247,10 @@ pub fn pass_write_only_globals(mod : WasmModule) -> WasmModule {
     return mod
   }
   let imp_globals = mod.imported_global_count()
-  let exported : Set[UInt32] = Set([])
+  let exported : Map[UInt32, Bool] = Map([])
   for exp in mod.exports {
     if exp.kind == Global {
-      exported.add(exp.idx)
+      exported[exp.idx] = true
     }
   }
 
@@ -283,13 +283,13 @@ pub fn pass_write_only_globals(mod : WasmModule) -> WasmModule {
     }
   }
 
-  let write_only : Set[UInt32] = Set([])
+  let write_only : Map[UInt32, Bool] = Map([])
   for i, gd in mod.globals {
     let gidx = imp_globals + i.reinterpret_as_uint()
     if gd.global_type.mutable &&
       !exported.contains(gidx) &&
       all_gets.get(gidx).unwrap_or(0) == 0 {
-      write_only.add(gidx)
+      write_only[gidx] = true
     }
   }
   if write_only.is_empty() {

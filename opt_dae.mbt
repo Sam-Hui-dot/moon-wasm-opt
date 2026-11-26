@@ -157,7 +157,7 @@ fn shift_locals_above(
 ///|
 fn insert_drop_before_calls(
   instrs : Array[Instr],
-  pruned_funcs : Set[UInt32],
+  pruned_funcs : Map[UInt32, Bool],
 ) -> Array[Instr] {
   let out : Array[Instr] = []
   for ins in instrs {
@@ -232,14 +232,14 @@ pub fn pass_dae(mod : WasmModule) -> WasmModule {
 
   // Collect call counts and externally/indirectly retained functions
   let call_counts : Map[UInt32, Int32] = Map([])
-  let retained : Set[UInt32] = Set([])
+  let retained : Map[UInt32, Bool] = Map([])
   for exp in mod.exports {
     if exp.kind == Func {
-      retained.add(exp.idx)
+      retained[exp.idx] = true
     }
   }
   match mod.start_func {
-    Some(f) => retained.add(f)
+    Some(f) => retained[f] = true
     None => ()
   }
   for tt in mod.tables {
@@ -253,14 +253,14 @@ pub fn pass_dae(mod : WasmModule) -> WasmModule {
   }
   for el in mod.elements {
     for f in el.func_indices {
-      retained.add(f)
+      retained[f] = true
     }
     for ex in el.init_exprs {
       collect_init_ref_funcs(ex, retained)
     }
   }
   for fb in mod.codes {
-    let edges : Set[UInt32] = Set([])
+    let edges : Map[UInt32, Bool] = Map([])
     collect_direct_calls_and_refs(fb.body, call_counts, edges, retained)
   }
 
@@ -335,7 +335,7 @@ pub fn pass_dae(mod : WasmModule) -> WasmModule {
   for t in mod.func_types {
     new_func_types.push(t)
   }
-  let pruned_funcs : Set[UInt32] = Set([])
+  let pruned_funcs : Map[UInt32, Bool] = Map([])
 
   for i, fb in working_codes {
     let fidx = imp_funcs + i.reinterpret_as_uint()
@@ -362,7 +362,7 @@ pub fn pass_dae(mod : WasmModule) -> WasmModule {
         locals: fb.locals,
         body: shift_locals_above(fb.body, pcnt.reinterpret_as_uint()),
       }
-      pruned_funcs.add(fidx)
+      pruned_funcs[fidx] = true
       changed = true
     }
   }

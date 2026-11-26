@@ -1,13 +1,13 @@
 ///|
-fn collect_heap_type_ref(ht : HeapType, live_types : Set[UInt32]) -> Unit {
+fn collect_heap_type_ref(ht : HeapType, live_types : Map[UInt32, Bool]) -> Unit {
   match ht {
-    Concrete(t) => live_types.add(t)
+    Concrete(t) => live_types[t] = true
     Abstract(_) => ()
   }
 }
 
 ///|
-fn collect_val_type_ref(vt : ValType, live_types : Set[UInt32]) -> Unit {
+fn collect_val_type_ref(vt : ValType, live_types : Map[UInt32, Bool]) -> Unit {
   match vt {
     RefNull(ht) | Ref(ht) => collect_heap_type_ref(ht, live_types)
     _ => ()
@@ -15,20 +15,23 @@ fn collect_val_type_ref(vt : ValType, live_types : Set[UInt32]) -> Unit {
 }
 
 ///|
-fn collect_block_type_ref(bt : BlockType, live_types : Set[UInt32]) -> Unit {
+fn collect_block_type_ref(
+  bt : BlockType,
+  live_types : Map[UInt32, Bool],
+) -> Unit {
   match bt {
     Empty => ()
     Val(vt) => collect_val_type_ref(vt, live_types)
-    TypeIdx(t) => live_types.add(t)
+    TypeIdx(t) => live_types[t] = true
   }
 }
 
 ///|
 fn collect_instr_refs(
   instrs : Array[Instr],
-  live_funcs : Set[UInt32],
-  live_globals : Set[UInt32],
-  live_types : Set[UInt32],
+  live_funcs : Map[UInt32, Bool],
+  live_globals : Map[UInt32, Bool],
+  live_types : Map[UInt32, Bool],
 ) -> Unit {
   for ins in instrs {
     match ins {
@@ -45,16 +48,16 @@ fn collect_instr_refs(
         collect_block_type_ref(bt, live_types)
         collect_instr_refs(b, live_funcs, live_globals, live_types)
       }
-      Call(f) | ReturnCall(f) | RefFunc(f) => live_funcs.add(f)
+      Call(f) | ReturnCall(f) | RefFunc(f) => live_funcs[f] = true
       CallIndirect(t, _)
       | ReturnCallIndirect(t, _)
       | CallRef(t)
-      | ReturnCallRef(t) => live_types.add(t)
+      | ReturnCallRef(t) => live_types[t] = true
       SelectTyped(ts) =>
         for vt in ts {
           collect_val_type_ref(vt, live_types)
         }
-      GlobalGet(g) | GlobalSet(g) => live_globals.add(g)
+      GlobalGet(g) | GlobalSet(g) => live_globals[g] = true
       RefNull(ht)
       | RefTest(ht)
       | RefTestNull(ht)
@@ -81,10 +84,10 @@ fn collect_instr_refs(
       | ArraySet(t)
       | ArrayFill(t)
       | ArrayInitData(t, _)
-      | ArrayInitElem(t, _) => live_types.add(t)
+      | ArrayInitElem(t, _) => live_types[t] = true
       ArrayCopy(t1, t2) => {
-        live_types.add(t1)
-        live_types.add(t2)
+        live_types[t1] = true
+        live_types[t2] = true
       }
       _ => ()
     }
@@ -272,22 +275,22 @@ pub fn pass_module_dce(mod : WasmModule) -> WasmModule {
   let imp_funcs = mod.imported_func_count()
   let imp_globals = mod.imported_global_count()
 
-  let live_funcs : Set[UInt32] = Set([])
-  let live_globals : Set[UInt32] = Set([])
-  let live_types : Set[UInt32] = Set([])
+  let live_funcs : Map[UInt32, Bool] = Map([])
+  let live_globals : Map[UInt32, Bool] = Map([])
+  let live_types : Map[UInt32, Bool] = Map([])
 
   // Preserve all imported functions and imported globals (host ABI boundary)
   for i in 0U..<imp_funcs {
-    live_funcs.add(i)
+    live_funcs[i] = true
   }
   for i in 0U..<imp_globals {
-    live_globals.add(i)
+    live_globals[i] = true
   }
 
   // Root set: exports, start, imports, tables, tags, elements, data offsets
   for imp in mod.imports {
     match imp.desc {
-      Func(t) => live_types.add(t)
+      Func(t) => live_types[t] = true
       Table(tt) => {
         collect_val_type_ref(tt.elem_type, live_types)
         match tt.init_expr {
@@ -297,7 +300,7 @@ pub fn pass_module_dce(mod : WasmModule) -> WasmModule {
         }
       }
       Global(gt) => collect_val_type_ref(gt.val_type, live_types)
-      Tag(tt) => live_types.add(tt.type_idx)
+      Tag(tt) => live_types[tt.type_idx] = true
       Mem(_) => ()
     }
   }
@@ -310,17 +313,17 @@ pub fn pass_module_dce(mod : WasmModule) -> WasmModule {
     }
   }
   for tg in mod.tags {
-    live_types.add(tg.type_idx)
+    live_types[tg.type_idx] = true
   }
   for exp in mod.exports {
     match exp.kind {
-      Func => live_funcs.add(exp.idx)
-      Global => live_globals.add(exp.idx)
+      Func => live_funcs[exp.idx] = true
+      Global => live_globals[exp.idx] = true
       _ => ()
     }
   }
   match mod.start_func {
-    Some(f) => live_funcs.add(f)
+    Some(f) => live_funcs[f] = true
     None => ()
   }
   for el in mod.elements {
@@ -334,7 +337,7 @@ pub fn pass_module_dce(mod : WasmModule) -> WasmModule {
       None => ()
     }
     for f in el.func_indices {
-      live_funcs.add(f)
+      live_funcs[f] = true
     }
     for expr in el.init_exprs {
       collect_instr_refs(expr, live_funcs, live_globals, live_types)
@@ -349,17 +352,17 @@ pub fn pass_module_dce(mod : WasmModule) -> WasmModule {
   }
 
   // Fixpoint reachability over defined functions and defined globals
-  let visited_funcs : Set[UInt32] = Set([])
-  let visited_globals : Set[UInt32] = Set([])
+  let visited_funcs : Map[UInt32, Bool] = Map([])
+  let visited_globals : Map[UInt32, Bool] = Map([])
   let mut progress = true
   while progress {
     progress = false
     for i, fb in mod.codes {
       let fidx = imp_funcs + i.reinterpret_as_uint()
       if live_funcs.contains(fidx) && !visited_funcs.contains(fidx) {
-        visited_funcs.add(fidx)
+        visited_funcs[fidx] = true
         progress = true
-        live_types.add(mod.func_types[i])
+        live_types[mod.func_types[i]] = true
         for lg in fb.locals {
           collect_val_type_ref(lg.val_type, live_types)
         }
@@ -369,7 +372,7 @@ pub fn pass_module_dce(mod : WasmModule) -> WasmModule {
     for i, gd in mod.globals {
       let gidx = imp_globals + i.reinterpret_as_uint()
       if live_globals.contains(gidx) && !visited_globals.contains(gidx) {
-        visited_globals.add(gidx)
+        visited_globals[gidx] = true
         progress = true
         collect_val_type_ref(gd.global_type.val_type, live_types)
         collect_instr_refs(gd.init, live_funcs, live_globals, live_types)
@@ -385,7 +388,7 @@ pub fn pass_module_dce(mod : WasmModule) -> WasmModule {
     cur_tid += g.subtypes.length().reinterpret_as_uint()
     group_ranges.push((start_t, cur_tid))
   }
-  let live_groups : Set[Int32] = Set([])
+  let live_groups : Map[Int32, Bool] = Map([])
   let mut t_progress = true
   while t_progress {
     t_progress = false
@@ -402,11 +405,11 @@ pub fn pass_module_dce(mod : WasmModule) -> WasmModule {
         }
       }
       if needed {
-        live_groups.add(gi)
+        live_groups[gi] = true
         t_progress = true
         for st in g.subtypes {
           for sup in st.supers {
-            live_types.add(sup)
+            live_types[sup] = true
           }
           match st.comp {
             Func(ps, rs) => {

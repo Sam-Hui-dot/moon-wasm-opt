@@ -238,10 +238,10 @@ pub fn analyze_module(
   }
   sections.sort_by((a, b) => b.bytes.compare(a.bytes))
 
-  let exported_funcs : Set[UInt32] = Set([])
+  let exported_funcs : Map[UInt32, Bool] = Map([])
   for exp in mod.exports {
     if exp.kind == Func {
-      exported_funcs.add(exp.idx)
+      exported_funcs[exp.idx] = true
     }
   }
 
@@ -592,15 +592,15 @@ pub fn diff_modules(
   for f in r2.top_functions {
     map2[f.name] = map2.get(f.name).unwrap_or(0) + f.bytes
   }
-  let all_names : Set[String] = Set([])
+  let all_names : Map[String, Bool] = Map([])
   for k, _ in map1 {
-    all_names.add(k)
+    all_names[k] = true
   }
   for k, _ in map2 {
-    all_names.add(k)
+    all_names[k] = true
   }
   let entries : Array[DiffFuncEntry] = []
-  for name in all_names {
+  for name, _ in all_names {
     let b = map1.get(name).unwrap_or(0)
     let a = map2.get(name).unwrap_or(0)
     let d = a - b

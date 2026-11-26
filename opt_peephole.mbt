@@ -334,6 +334,43 @@ fn is_i64_zero_identity(op : Byte) -> Bool {
 }
 
 ///|
+/// Invert integer comparisons (`i32` / `i64`) when followed by `i32.eqz`.
+/// Deliberately returns `None` for float comparisons (`f32` / `f64`) to preserve `NaN` semantics.
+fn invert_int_cmp(op : Byte) -> Byte? {
+  match op {
+    // i32: eq<->ne, lt_s<->ge_s, lt_u<->ge_u, gt_s<->le_s, gt_u<->le_u
+    b'\x46' => Some(b'\x47')
+    b'\x47' => Some(b'\x46')
+    b'\x48' => Some(b'\x4E')
+    b'\x4E' => Some(b'\x48')
+    b'\x49' => Some(b'\x4F')
+    b'\x4F' => Some(b'\x49')
+    b'\x4A' => Some(b'\x4C')
+    b'\x4C' => Some(b'\x4A')
+    b'\x4B' => Some(b'\x4D')
+    b'\x4D' => Some(b'\x4B')
+    // i64: eq<->ne, lt_s<->ge_s, lt_u<->ge_u, gt_s<->le_s, gt_u<->le_u
+    b'\x51' => Some(b'\x52')
+    b'\x52' => Some(b'\x51')
+    b'\x53' => Some(b'\x59')
+    b'\x59' => Some(b'\x53')
+    b'\x54' => Some(b'\x5A')
+    b'\x5A' => Some(b'\x54')
+    b'\x55' => Some(b'\x57')
+    b'\x57' => Some(b'\x55')
+    b'\x56' => Some(b'\x58')
+    b'\x58' => Some(b'\x56')
+    _ => None
+  }
+}
+
+///|
+fn is_bool_result_op(op : Byte) -> Bool {
+  let v = op.to_int()
+  v >= 0x45 && v <= 0x66
+}
+
+///|
 fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
   // Recursively optimize nested blocks first
   let staged : Array[Instr] = []
@@ -399,6 +436,13 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
               }
               None => ()
             }
+          (NumOp(op), NumOp(b'\x45'), NumOp(b'\x45')) if is_bool_result_op(op) => {
+            // Double negation of a guaranteed 0/1 comparison or eqz is a no-op
+            ignore(out.pop())
+            ignore(out.pop())
+            reduced = true
+            continue
+          }
           _ => ()
         }
       }
@@ -510,13 +554,37 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             reduced = true
             continue
           }
-          // Constant condition branches & if-folding
+          // Integer comparison followed by i32.eqz -> inverted comparison (saves 1 byte, excludes float NaN ops)
+          (NumOp(cmp_op), NumOp(b'\x45')) =>
+            match invert_int_cmp(cmp_op) {
+              Some(inv) => {
+                ignore(out.pop())
+                ignore(out.pop())
+                out.push(NumOp(inv))
+                reduced = true
+                continue
+              }
+              None => ()
+            }
+          // Constant condition branches, br_table, & if-folding
           (I32Const(c), BrIf(lbl)) => {
             ignore(out.pop())
             ignore(out.pop())
             if c != 0 {
               out.push(Br(lbl))
             }
+            reduced = true
+            continue
+          }
+          (I32Const(idx), BrTable(targets, def_lbl)) => {
+            ignore(out.pop())
+            ignore(out.pop())
+            let chosen = if idx >= 0 && idx < targets.length() {
+              targets[idx]
+            } else {
+              def_lbl
+            }
+            out.push(Br(chosen))
             reduced = true
             continue
           }

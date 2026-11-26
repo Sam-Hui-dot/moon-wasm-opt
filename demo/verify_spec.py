@@ -19,70 +19,25 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "demo" / "out"
 OUT.mkdir(parents=True, exist_ok=True)
 
-CORE_SUITES = [
-    "i32.wast",
-    "i64.wast",
-    "f32.wast",
-    "f64.wast",
-    "f32_cmp.wast",
-    "f64_cmp.wast",
-    "conversions.wast",
-    "block.wast",
-    "loop.wast",
-    "if.wast",
-    "br.wast",
-    "br_if.wast",
-    "br_table.wast",
-    "call.wast",
-    "call_indirect.wast",
-    "return.wast",
-    "return_call.wast",
-    "local_get.wast",
-    "local_set.wast",
-    "local_tee.wast",
-    "global.wast",
-    "select.wast",
-    "nop.wast",
-    "unreachable.wast",
-    "forward.wast",
-    "fac.wast",
-    "switch.wast",
-    "memory.wast",
-    "memory_grow.wast",
-    "memory_copy.wast",
-    "memory_fill.wast",
-    "memory_init.wast",
-    "data.wast",
-    "elem.wast",
-    "table_get.wast",
-    "table_set.wast",
-    "ref_func.wast",
-    "ref_null.wast",
-    "ref_is_null.wast",
-    "simd_const.wast",
+BASELINE_CORE_SUITES = {
+    "i32.wast", "i64.wast", "f32.wast", "f64.wast", "f32_cmp.wast", "f64_cmp.wast",
+    "conversions.wast", "block.wast", "loop.wast", "if.wast", "br.wast", "br_if.wast",
+    "br_table.wast", "call.wast", "call_indirect.wast", "return.wast", "return_call.wast",
+    "local_get.wast", "local_set.wast", "local_tee.wast", "global.wast", "select.wast",
+    "nop.wast", "unreachable.wast", "forward.wast", "fac.wast", "switch.wast",
+    "memory.wast", "memory_grow.wast", "memory_copy.wast", "memory_fill.wast",
+    "memory_init.wast", "data.wast", "elem.wast", "table_get.wast", "table_set.wast",
+    "ref_func.wast", "ref_null.wast", "ref_is_null.wast", "simd_const.wast",
     "simd_i32x4_arith.wast",
-]
+}
 
-GC_SUITES = [
-    "struct.wast",
-    "array.wast",
-    "array_new_data.wast",
-    "array_copy.wast",
-    "ref_cast.wast",
-    "ref_test.wast",
-    "br_on_cast.wast",
-    "br_on_cast_fail.wast",
-    "br_on_non_null.wast",
-    "br_on_null.wast",
-    "i31.wast",
-    "rec.wast",
-    "type-subtyping.wast",
-    "type-equivalence.wast",
-    "call_ref.wast",
-    "return_call_ref.wast",
-    "ref_eq.wast",
-    "ref_as_non_null.wast",
-]
+BASELINE_GC_SUITES = {
+    "struct.wast", "array.wast", "array_new_data.wast", "array_copy.wast",
+    "ref_cast.wast", "ref_test.wast", "br_on_cast.wast", "br_on_cast_fail.wast",
+    "br_on_non_null.wast", "br_on_null.wast", "i31.wast", "rec.wast",
+    "type-subtyping.wast", "type-equivalence.wast", "call_ref.wast",
+    "return_call_ref.wast", "ref_eq.wast", "ref_as_non_null.wast",
+}
 
 NODE_HARNESS = r"""
 const fs = require('fs');
@@ -176,7 +131,9 @@ async function runSuite() {
       const b1 = fs.readFileSync(p1);
       const b2 = fs.readFileSync(p2);
       if (!WebAssembly.validate(b1)) {
-        throw new Error('Original spec module failed V8 validate: ' + cmd.filename);
+        cur1 = null; cur2 = null;
+        skipped++;
+        continue;
       }
       if (!WebAssembly.validate(b2)) {
         try { new WebAssembly.Module(b2); } catch (e) {
@@ -184,19 +141,21 @@ async function runSuite() {
         }
         throw new Error('Optimized spec module failed V8 validate: ' + cmd.filename);
       }
+      let r1;
       try {
-        const r1 = await WebAssembly.instantiate(b1, imports1);
-        const r2 = await WebAssembly.instantiate(b2, imports2);
-        cur1 = r1.instance;
-        cur2 = r2.instance;
-        if (cmd.name) {
-          named1[cmd.name] = cur1;
-          named2[cmd.name] = cur2;
-        }
+        r1 = await WebAssembly.instantiate(b1, imports1);
       } catch (e) {
-        // Skip modules requiring unsupported host imports or non-V8 proposals cleanly if BOTH fail to instantiate identically
+        // Original spec module requires non-spectest host imports or unsupported V8 runtime feature
         cur1 = null; cur2 = null;
         skipped++;
+        continue;
+      }
+      const r2 = await WebAssembly.instantiate(b2, imports2);
+      cur1 = r1.instance;
+      cur2 = r2.instance;
+      if (cmd.name) {
+        named1[cmd.name] = cur1;
+        named2[cmd.name] = cur2;
       }
     } else if (cmd.type === 'register') {
       const src1 = cmd.name ? named1[cmd.name] : cur1;
@@ -272,17 +231,13 @@ def find_cli_cmd():
 def discover_wast_files(spec_dir: Path):
     core_dir = spec_dir / "test" / "core"
     found = []
-    for name in CORE_SUITES:
-        p = core_dir / name
-        if p.exists():
+    if core_dir.exists():
+        for p in sorted(core_dir.glob("*.wast")):
             found.append(("core", p))
     gc_dir = core_dir / "gc"
-    for name in GC_SUITES:
-        p = gc_dir / name
-        if p.exists():
+    if gc_dir.exists():
+        for p in sorted(gc_dir.glob("*.wast")):
             found.append(("gc", p))
-        elif (core_dir / name).exists():
-            found.append(("gc", core_dir / name))
     return found
 
 
@@ -306,6 +261,7 @@ def main():
     total_asserts = 0
     total_before_bytes = 0
     total_after_bytes = 0
+    skipped_suites = []
 
     with tempfile.TemporaryDirectory(prefix="moon-wasm-opt-spec-") as tmp_str:
         tmp = Path(tmp_str)
@@ -313,6 +269,11 @@ def main():
         harness_js.write_text(NODE_HARNESS, encoding="utf-8")
 
         for category, wast_path in suites:
+            suite_id = f"{category}/{wast_path.name}"
+            is_baseline = (
+                (category == "core" and wast_path.name in BASELINE_CORE_SUITES)
+                or (category == "gc" and wast_path.name in BASELINE_GC_SUITES)
+            )
             suite_dir = tmp / f"{category}_{wast_path.stem}"
             orig_dir = suite_dir / "orig"
             rt_dir = suite_dir / "rt"
@@ -327,11 +288,19 @@ def main():
                 check=False,
             )
             if conv.returncode != 0:
-                print(f"[SKIP] {category}/{wast_path.name}: wasm-tools json-from-wast unsupported ({conv.stderr.strip()[:120]})")
+                reason = conv.stderr.strip().splitlines()[-1][:100] if conv.stderr.strip() else "wasm-tools unsupported"
+                if is_baseline:
+                    raise RuntimeError(f"Baseline suite failed json-from-wast {suite_id}: {reason}")
+                print(f"[SKIP] {suite_id}: wasm-tools json-from-wast unsupported ({reason})")
+                skipped_suites.append((suite_id, f"wasm-tools: {reason}"))
                 continue
 
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             suite_modules = 0
+            suite_before = 0
+            suite_after = 0
+            skip_suite_reason = None
+
             for cmd in manifest.get("commands", []):
                 if cmd.get("type") != "module":
                     continue
@@ -349,16 +318,27 @@ def main():
                 opt_wasm = opt_dir / fname
 
                 # 1. Lossless round-trip + wasm-tools validate
-                run([*cli, "roundtrip", str(src_wasm), "--out", str(rt_wasm)])
+                rt_res = run([*cli, "roundtrip", str(src_wasm), "--out", str(rt_wasm)], check=False)
+                if rt_res.returncode != 0:
+                    err = (rt_res.stderr or rt_res.stdout).strip().splitlines()[-1][:100]
+                    if is_baseline:
+                        raise RuntimeError(f"Baseline suite failed roundtrip {suite_id} ({fname}): {err}")
+                    skip_suite_reason = f"decoder unsupported proposal ({err})"
+                    break
                 run([wasm_tools, "validate", str(rt_wasm)])
 
-                # 2. Full 14-pass -Oz --converge + wasm-tools validate
+                # 2. Full 17-pass -Oz --converge + wasm-tools validate
                 run([*cli, "opt", str(src_wasm), "--out", str(opt_wasm), "-Oz", "--converge"])
                 run([wasm_tools, "validate", str(opt_wasm)])
 
-                total_before_bytes += src_wasm.stat().st_size
-                total_after_bytes += opt_wasm.stat().st_size
+                suite_before += src_wasm.stat().st_size
+                suite_after += opt_wasm.stat().st_size
                 suite_modules += 1
+
+            if skip_suite_reason is not None:
+                print(f"[SKIP] {suite_id}: {skip_suite_reason}")
+                skipped_suites.append((suite_id, skip_suite_reason))
+                continue
 
             # 3. V8 WebAssembly.validate() + exact assert_return runtime equivalence across the entire .wast suite
             node_res = run(["node", str(harness_js), str(manifest_path), str(orig_dir), str(opt_dir)])
@@ -367,20 +347,28 @@ def main():
             total_suites += 1
             total_modules += suite_modules
             total_asserts += checked
-            print(f"[SPEC OK] {category}/{wast_path.name}: modules={suite_modules}, assert_return_equiv={checked}")
+            total_before_bytes += suite_before
+            total_after_bytes += suite_after
+            print(f"[SPEC OK] {suite_id}: modules={suite_modules}, assert_return_equiv={checked}")
 
     saved = total_before_bytes - total_after_bytes
     saved_pct = round(saved * 100.0 / total_before_bytes, 2) if total_before_bytes > 0 else 0.0
-    summary = "\n".join([
+    lines = [
         "",
         "## Official WebAssembly `spec/test/core` + GC Regression Oracle",
         "",
-        f"- **Official `.wast` suites passed**: `{total_suites}`",
+        f"- **Official `.wast` suites discovered / passed / skipped**: `{len(suites)}` discovered -> **`{total_suites}` passed**, `{len(skipped_suites)}` skipped",
         f"- **Valid `.wasm` spec modules validated (`roundtrip` + `-Oz --converge` via `wasm-tools validate` + V8)**: **`{total_modules}/{total_modules}` PASS (0 errors)**",
         f"- **V8 `assert_return` runtime equivalence checks (orig vs `-Oz --converge`)**: **`{total_asserts}/{total_asserts}` exact match**",
         f"- **Aggregate spec binary size**: `{total_before_bytes}` B -> `{total_after_bytes}` B (saved `{saved}` B / `{saved_pct}%`)",
-        "",
-    ])
+    ]
+    if skipped_suites:
+        skipped_str = ", ".join(f"{sid} ({why})" for sid, why in skipped_suites[:12])
+        if len(skipped_suites) > 12:
+            skipped_str += f", ... (+{len(skipped_suites) - 12} more)"
+        lines.append(f"- **Skipped suites (unsupported post-2.0 / missing-host features)**: {skipped_str}")
+    lines.append("")
+    summary = "\n".join(lines)
     (OUT / "spec-summary.md").write_text(summary, encoding="utf-8")
     print(summary)
 

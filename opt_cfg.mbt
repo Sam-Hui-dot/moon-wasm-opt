@@ -74,14 +74,19 @@ fn trim_br_table_targets(
 ///|
 fn simplify_cfg_seq(instrs : Array[Instr]) -> Array[Instr] {
   let out : Array[Instr] = []
+  let mut changed = false
   for raw_ins in instrs {
     match raw_ins {
       Block(bt, body) => {
         let nb = simplify_cfg_seq(body)
+        if !physical_equal(nb, body) {
+          changed = true
+        }
         // Collapse Block(Empty, [Block(Empty, inner)]) -> Block(Empty, merged_inner)
         if bt == Empty && nb.length() == 1 {
           match nb[0] {
             Block(Empty, inner) => {
+              changed = true
               out.push(Block(Empty, merge_nested_block_depths(inner, 0U)))
               continue
             }
@@ -90,26 +95,45 @@ fn simplify_cfg_seq(instrs : Array[Instr]) -> Array[Instr] {
         }
         out.push(Block(bt, nb))
       }
-      Loop(bt, body) => out.push(Loop(bt, simplify_cfg_seq(body)))
-      TryTable(bt, cs, body) =>
-        out.push(TryTable(bt, cs, simplify_cfg_seq(body)))
+      Loop(bt, body) => {
+        let nb = simplify_cfg_seq(body)
+        if !physical_equal(nb, body) {
+          changed = true
+        }
+        out.push(Loop(bt, nb))
+      }
+      TryTable(bt, cs, body) => {
+        let nb = simplify_cfg_seq(body)
+        if !physical_equal(nb, body) {
+          changed = true
+        }
+        out.push(TryTable(bt, cs, nb))
+      }
       BrTable(targets, def_lbl) => {
         let trimmed = trim_br_table_targets(targets, def_lbl)
         if trimmed.is_empty() {
+          changed = true
           out.push(Drop)
           out.push(Br(def_lbl))
         } else {
+          if !physical_equal(trimmed, targets) {
+            changed = true
+          }
           out.push(BrTable(trimmed, def_lbl))
         }
       }
       If(bt, then_b, else_b) => {
         let mut nt = simplify_cfg_seq(then_b)
         let mut ne = simplify_cfg_seq(else_b)
+        if !physical_equal(nt, then_b) || !physical_equal(ne, else_b) {
+          changed = true
+        }
 
         // Invert condition when preceded by i32.eqz and else branch is non-empty
         if !ne.is_empty() &&
           !out.is_empty() &&
           out[out.length() - 1] == NumOp(b'\x45') {
+          changed = true
           ignore(out.pop())
           let tmp = nt
           nt = ne
@@ -121,6 +145,7 @@ fn simplify_cfg_seq(instrs : Array[Instr]) -> Array[Instr] {
           if nt.length() == 1 && ne.is_empty() {
             match nt[0] {
               Br(l) => {
+                changed = true
                 if l == 0U {
                   out.push(Drop)
                 } else {
@@ -136,6 +161,7 @@ fn simplify_cfg_seq(instrs : Array[Instr]) -> Array[Instr] {
           if nt.is_empty() && ne.length() == 1 {
             match ne[0] {
               Br(l) => {
+                changed = true
                 if l == 0U {
                   out.push(Drop)
                 } else {
@@ -159,6 +185,7 @@ fn simplify_cfg_seq(instrs : Array[Instr]) -> Array[Instr] {
             match nt[0] {
               Br(l) =>
                 if l > 0U {
+                  changed = true
                   out.push(BrIf(l - 1U))
                   for u in dec_branch_depths(ne, 1U) {
                     out.push(u)
@@ -176,6 +203,7 @@ fn simplify_cfg_seq(instrs : Array[Instr]) -> Array[Instr] {
             match ne[0] {
               Br(l) =>
                 if l > 0U {
+                  changed = true
                   if !out.is_empty() && out[out.length() - 1] == NumOp(b'\x45') {
                     ignore(out.pop())
                   } else {
@@ -197,6 +225,7 @@ fn simplify_cfg_seq(instrs : Array[Instr]) -> Array[Instr] {
             is_unconditional_terminator(nt[nt.length() - 1]) &&
             !instrs_branch_to_depth(nt, 0U) &&
             !instrs_branch_to_depth(ne, 0U) {
+            changed = true
             out.push(If(Empty, nt, []))
             for u in dec_branch_depths(ne, 1U) {
               out.push(u)
@@ -210,15 +239,47 @@ fn simplify_cfg_seq(instrs : Array[Instr]) -> Array[Instr] {
       other => out.push(other)
     }
   }
-  out
+  if !changed {
+    instrs
+  } else {
+    out
+  }
+}
+
+///|
+fn pass_simplify_cfg_dirty(
+  mod : WasmModule,
+  dirty : Array[Bool]?,
+) -> (WasmModule, Array[Bool]) {
+  let out_changed : Array[Bool] = Array::make(mod.codes.length(), false)
+  let new_codes : Array[FuncBody] = []
+  let mut any = false
+  for i, fb in mod.codes {
+    let run = match dirty {
+      Some(d) => d[i]
+      None => true
+    }
+    if run {
+      let nb = simplify_cfg_seq(fb.body)
+      if !physical_equal(nb, fb.body) && nb != fb.body {
+        any = true
+        out_changed[i] = true
+        new_codes.push({ locals: fb.locals, body: nb, })
+        continue
+      }
+    }
+    new_codes.push(fb)
+  }
+  if !any {
+    (mod, out_changed)
+  } else {
+    ({ ..mod, codes: new_codes, }, out_changed)
+  }
 }
 
 ///|
 /// Pass 9: Structured control-flow simplification (`eqz + if` inversion, `if -> br_if`, early-exit `else` flattening, `br_table` tail compaction, and nested block collapse).
 pub fn pass_simplify_cfg(mod : WasmModule) -> WasmModule {
-  let new_codes : Array[FuncBody] = []
-  for fb in mod.codes {
-    new_codes.push({ locals: fb.locals, body: simplify_cfg_seq(fb.body), })
-  }
-  { ..mod, codes: new_codes, }
+  let (next, _) = pass_simplify_cfg_dirty(mod, None)
+  next
 }

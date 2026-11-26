@@ -1,26 +1,53 @@
 ///|
-fn set_clone_u32(src : Set[UInt32]) -> Set[UInt32] {
-  let out : Set[UInt32] = Set([])
-  for x in src {
-    out.add(x)
-  }
-  out
+/// Compact fixed-word bitset for zero-allocation backward local liveness & dense interference matrices.
+priv struct LocalBitSet {
+  words : FixedArray[UInt64]
 }
 
 ///|
-fn set_union_into(dst : Set[UInt32], src : Set[UInt32]) -> Unit {
-  for x in src {
-    dst.add(x)
+fn LocalBitSet::new(num_words : Int32) -> LocalBitSet {
+  { words: FixedArray::make(num_words, 0UL), }
+}
+
+///|
+fn LocalBitSet::clone(self : LocalBitSet) -> LocalBitSet {
+  let n = self.words.length()
+  { words: FixedArray::makei(n, i => self.words[i]), }
+}
+
+///|
+fn LocalBitSet::add(self : LocalBitSet, idx : UInt32) -> Unit {
+  let k = idx.reinterpret_as_int()
+  let w = k >> 6
+  if w >= 0 && w < self.words.length() {
+    self.words[w] = self.words[w] | (1UL << (k & 63))
   }
 }
 
 ///|
-fn set_equal_u32(a : Set[UInt32], b : Set[UInt32]) -> Bool {
-  if a.length() != b.length() {
-    return false
+fn LocalBitSet::remove(self : LocalBitSet, idx : UInt32) -> Unit {
+  let k = idx.reinterpret_as_int()
+  let w = k >> 6
+  if w >= 0 && w < self.words.length() {
+    self.words[w] = self.words[w] & (1UL << (k & 63)).lnot()
   }
-  for x in a {
-    if !b.contains(x) {
+}
+
+///|
+fn LocalBitSet::contains(self : LocalBitSet, idx : UInt32) -> Bool {
+  let k = idx.reinterpret_as_int()
+  let w = k >> 6
+  if w >= 0 && w < self.words.length() {
+    (self.words[w] & (1UL << (k & 63))) != 0UL
+  } else {
+    false
+  }
+}
+
+///|
+fn LocalBitSet::is_zero(self : LocalBitSet) -> Bool {
+  for i in 0..<self.words.length() {
+    if self.words[i] != 0UL {
       return false
     }
   }
@@ -28,16 +55,58 @@ fn set_equal_u32(a : Set[UInt32], b : Set[UInt32]) -> Bool {
 }
 
 ///|
-fn label_live_at(
-  label_stack : Array[Set[UInt32]],
+fn LocalBitSet::clear_all(self : LocalBitSet) -> Unit {
+  for i in 0..<self.words.length() {
+    self.words[i] = 0UL
+  }
+}
+
+///|
+fn LocalBitSet::copy_from(self : LocalBitSet, src : LocalBitSet) -> Unit {
+  for i in 0..<self.words.length() {
+    self.words[i] = src.words[i]
+  }
+}
+
+///|
+fn LocalBitSet::union_into(self : LocalBitSet, src : LocalBitSet) -> Unit {
+  for i in 0..<self.words.length() {
+    self.words[i] = self.words[i] | src.words[i]
+  }
+}
+
+///|
+fn LocalBitSet::equals(self : LocalBitSet, other : LocalBitSet) -> Bool {
+  for i in 0..<self.words.length() {
+    if self.words[i] != other.words[i] {
+      return false
+    }
+  }
+  true
+}
+
+///|
+fn LocalBitSet::intersects(self : LocalBitSet, other : LocalBitSet) -> Bool {
+  for i in 0..<self.words.length() {
+    if (self.words[i] & other.words[i]) != 0UL {
+      return true
+    }
+  }
+  false
+}
+
+///|
+fn label_bitset_at(
+  label_stack : Array[LocalBitSet],
   depth : UInt32,
-) -> Set[UInt32] {
+  empty : LocalBitSet,
+) -> LocalBitSet {
   let n = label_stack.length()
   let d = depth.reinterpret_as_int()
   if d >= 0 && d < n {
     label_stack[n - 1 - d]
   } else {
-    Set([])
+    empty
   }
 }
 
@@ -78,15 +147,18 @@ fn build_func_local_types(
 }
 
 ///|
-fn collect_all_local_reads(instrs : Array[Instr], reads : Set[UInt32]) -> Unit {
+fn collect_all_local_reads_bs(
+  instrs : Array[Instr],
+  reads : LocalBitSet,
+) -> Unit {
   for ins in instrs {
     match ins {
       LocalGet(l) => reads.add(l)
       Block(_, b) | Loop(_, b) | TryTable(_, _, b) =>
-        collect_all_local_reads(b, reads)
+        collect_all_local_reads_bs(b, reads)
       If(_, t, e) => {
-        collect_all_local_reads(t, reads)
-        collect_all_local_reads(e, reads)
+        collect_all_local_reads_bs(t, reads)
+        collect_all_local_reads_bs(e, reads)
       }
       _ => ()
     }
@@ -118,8 +190,12 @@ fn prop_copies_seq(
   }
 
   fn clear_state() -> Unit {
-    aliases.clear()
-    consts.clear()
+    if !aliases.is_empty() {
+      aliases.clear()
+    }
+    if !consts.is_empty() {
+      consts.clear()
+    }
   }
 
   fn resolve_alias(x : UInt32) -> UInt32 {
@@ -143,39 +219,62 @@ fn prop_copies_seq(
   }
 
   let out : Array[Instr] = []
+  let mut changed = false
   for raw_ins in instrs {
     match raw_ins {
       Block(bt, b) => {
         clear_state()
-        out.push(Block(bt, prop_copies_seq(b, local_types)))
+        let nb = prop_copies_seq(b, local_types)
+        if !physical_equal(nb, b) {
+          changed = true
+        }
+        out.push(Block(bt, nb))
       }
       Loop(bt, b) => {
         clear_state()
-        out.push(Loop(bt, prop_copies_seq(b, local_types)))
+        let nb = prop_copies_seq(b, local_types)
+        if !physical_equal(nb, b) {
+          changed = true
+        }
+        out.push(Loop(bt, nb))
       }
       If(bt, t, e) => {
         clear_state()
-        out.push(
-          If(
-            bt,
-            prop_copies_seq(t, local_types),
-            prop_copies_seq(e, local_types),
-          ),
-        )
+        let nt = prop_copies_seq(t, local_types)
+        let ne = prop_copies_seq(e, local_types)
+        if !physical_equal(nt, t) || !physical_equal(ne, e) {
+          changed = true
+        }
+        out.push(If(bt, nt, ne))
       }
       TryTable(bt, cs, b) => {
         clear_state()
-        out.push(TryTable(bt, cs, prop_copies_seq(b, local_types)))
+        let nb = prop_copies_seq(b, local_types)
+        if !physical_equal(nb, b) {
+          changed = true
+        }
+        out.push(TryTable(bt, cs, nb))
       }
       LocalGet(x) =>
         match consts.get(x) {
           Some(c_ins) =>
             if instr_encoded_size(c_ins) <= instr_encoded_size(LocalGet(x)) {
+              changed = true
               out.push(c_ins)
             } else {
-              out.push(LocalGet(resolve_alias(x)))
+              let r = resolve_alias(x)
+              if r != x {
+                changed = true
+              }
+              out.push(LocalGet(r))
             }
-          None => out.push(LocalGet(resolve_alias(x)))
+          None => {
+            let r = resolve_alias(x)
+            if r != x {
+              changed = true
+            }
+            out.push(LocalGet(r))
+          }
         }
       LocalSet(dst) | LocalTee(dst) => {
         let prev = if out.is_empty() {
@@ -222,56 +321,77 @@ fn prop_copies_seq(
       other => out.push(other)
     }
   }
-  out
+  if !changed {
+    instrs
+  } else {
+    out
+  }
 }
 
 ///|
 /// Backward structured liveness analysis with optional dead-store rewriting (`rewrite=true`).
-/// Returns `(live_before, rewritten_instrs)`.
+/// Uses fixed-word `LocalBitSet` for zero-hash inner loops.
 fn backward_liveness_dse(
   instrs : Array[Instr],
-  live_after_exit : Set[UInt32],
-  label_stack : Array[Set[UInt32]],
-  catch_live : Set[UInt32],
+  live_after_exit : LocalBitSet,
+  label_stack : Array[LocalBitSet],
+  catch_live : LocalBitSet,
+  catch_active : Bool,
+  empty_bs : LocalBitSet,
   local_types : Array[ValType],
-  all_reads : Set[UInt32],
+  all_reads : LocalBitSet,
   rewrite : Bool,
-) -> (Set[UInt32], Array[Instr]) {
+) -> (LocalBitSet, Array[Instr]) {
   let n = instrs.length()
+  let num_words = live_after_exit.words.length()
   let rev_out : Array[Instr] = []
-  let mut live = set_clone_u32(live_after_exit)
-  set_union_into(live, catch_live)
+  let mut body_changed = false
+  let live = live_after_exit.clone()
+  if catch_active {
+    live.union_into(catch_live)
+  }
 
   let mut idx = n - 1
   while idx >= 0 {
     let ins = instrs[idx]
     match ins {
       Unreachable | Return | Throw(_) | ThrowRef => {
-        live = set_clone_u32(catch_live)
+        if catch_active {
+          live.copy_from(catch_live)
+        } else {
+          live.clear_all()
+        }
         if rewrite {
           rev_out.push(ins)
         }
       }
       ReturnCall(_) | ReturnCallIndirect(_, _) | ReturnCallRef(_) => {
-        live = set_clone_u32(catch_live)
+        if catch_active {
+          live.copy_from(catch_live)
+        } else {
+          live.clear_all()
+        }
         if rewrite {
           rev_out.push(ins)
         }
       }
       Br(l) => {
-        live = set_clone_u32(label_live_at(label_stack, l))
-        set_union_into(live, catch_live)
+        live.copy_from(label_bitset_at(label_stack, l, empty_bs))
+        if catch_active {
+          live.union_into(catch_live)
+        }
         if rewrite {
           rev_out.push(ins)
         }
       }
       BrTable(ts, d) => {
-        let next_live = set_clone_u32(label_live_at(label_stack, d))
+        live.copy_from(label_bitset_at(label_stack, d, empty_bs))
         for t in ts {
-          set_union_into(next_live, label_live_at(label_stack, t))
+          live.union_into(label_bitset_at(label_stack, t, empty_bs))
         }
-        set_union_into(next_live, catch_live)
-        live = next_live
+        if catch_active {
+          live.union_into(catch_live)
+        }
         if rewrite {
           rev_out.push(ins)
         }
@@ -281,8 +401,10 @@ fn backward_liveness_dse(
       | BrOnNonNull(l)
       | BrOnCast(_, l, _, _)
       | BrOnCastFail(_, l, _, _) => {
-        set_union_into(live, label_live_at(label_stack, l))
-        set_union_into(live, catch_live)
+        live.union_into(label_bitset_at(label_stack, l, empty_bs))
+        if catch_active {
+          live.union_into(catch_live)
+        }
         if rewrite {
           rev_out.push(ins)
         }
@@ -296,7 +418,9 @@ fn backward_liveness_dse(
       LocalSet(x) => {
         let is_live = live.contains(x)
         live.remove(x)
-        set_union_into(live, catch_live)
+        if catch_active {
+          live.union_into(catch_live)
+        }
         if rewrite {
           let i = x.reinterpret_as_int()
           let non_null_read_elsewhere = i >= 0 &&
@@ -304,6 +428,7 @@ fn backward_liveness_dse(
             is_non_null_valtype(local_types[i]) &&
             all_reads.contains(x)
           if !is_live && !non_null_read_elsewhere {
+            body_changed = true
             rev_out.push(Drop)
           } else {
             rev_out.push(ins)
@@ -313,7 +438,9 @@ fn backward_liveness_dse(
       LocalTee(x) => {
         let is_live = live.contains(x)
         live.remove(x)
-        set_union_into(live, catch_live)
+        if catch_active {
+          live.union_into(catch_live)
+        }
         if rewrite {
           let i = x.reinterpret_as_int()
           let non_null_read_elsewhere = i >= 0 &&
@@ -322,99 +449,128 @@ fn backward_liveness_dse(
             all_reads.contains(x)
           if is_live || non_null_read_elsewhere {
             rev_out.push(ins)
+          } else {
+            body_changed = true
           }
-          // Else dead LocalTee is simply omitted (stack value passes through unchanged)
         }
       }
       Block(bt, body) => {
-        let exit_live = set_clone_u32(live)
+        let exit_live = live.clone()
         label_stack.push(exit_live)
         let (lb, new_body) = backward_liveness_dse(
-          body, exit_live, label_stack, catch_live, local_types, all_reads, rewrite,
+          body, exit_live, label_stack, catch_live, catch_active, empty_bs, local_types,
+          all_reads, rewrite,
         )
         ignore(label_stack.pop())
-        live = lb
-        set_union_into(live, catch_live)
+        live.copy_from(lb)
+        if catch_active {
+          live.union_into(catch_live)
+        }
         if rewrite {
+          if !physical_equal(new_body, body) {
+            body_changed = true
+          }
           rev_out.push(Block(bt, new_body))
         }
       }
       If(bt, then_b, else_b) => {
-        let exit_live = set_clone_u32(live)
+        let exit_live = live.clone()
         label_stack.push(exit_live)
         let (lt, new_t) = backward_liveness_dse(
-          then_b, exit_live, label_stack, catch_live, local_types, all_reads, rewrite,
+          then_b, exit_live, label_stack, catch_live, catch_active, empty_bs, local_types,
+          all_reads, rewrite,
         )
         let (le, new_e) = if else_b.is_empty() {
-          (set_clone_u32(exit_live), else_b)
+          (exit_live.clone(), else_b)
         } else {
           backward_liveness_dse(
-            else_b, exit_live, label_stack, catch_live, local_types, all_reads, rewrite,
+            else_b, exit_live, label_stack, catch_live, catch_active, empty_bs, local_types,
+            all_reads, rewrite,
           )
         }
         ignore(label_stack.pop())
-        set_union_into(lt, le)
-        set_union_into(lt, catch_live)
-        live = lt
+        live.copy_from(lt)
+        live.union_into(le)
+        if catch_active {
+          live.union_into(catch_live)
+        }
         if rewrite {
+          if !physical_equal(new_t, then_b) || !physical_equal(new_e, else_b) {
+            body_changed = true
+          }
           rev_out.push(If(bt, new_t, new_e))
         }
       }
       Loop(bt, body) => {
-        let exit_live = set_clone_u32(live)
-        let mut head_live : Set[UInt32] = Set([])
+        let exit_live = live.clone()
+        let head_live = LocalBitSet::new(num_words)
         let mut converged = false
         for _ in 0..<64 {
           label_stack.push(head_live)
           let (cand, _) = backward_liveness_dse(
-            body, exit_live, label_stack, catch_live, local_types, all_reads, false,
+            body, exit_live, label_stack, catch_live, catch_active, empty_bs, local_types,
+            all_reads, false,
           )
           ignore(label_stack.pop())
-          set_union_into(cand, head_live)
-          if set_equal_u32(cand, head_live) {
+          cand.union_into(head_live)
+          if cand.equals(head_live) {
             converged = true
             break
           }
-          head_live = cand
+          head_live.copy_from(cand)
         }
         if !converged {
-          // Conservative fallback if loop fixpoint didn't finish in 64 rounds
-          collect_all_local_reads(body, head_live)
-          set_union_into(head_live, exit_live)
+          collect_all_local_reads_bs(body, head_live)
+          head_live.union_into(exit_live)
         }
         label_stack.push(head_live)
         let (lb, new_body) = backward_liveness_dse(
-          body, exit_live, label_stack, catch_live, local_types, all_reads, rewrite,
+          body, exit_live, label_stack, catch_live, catch_active, empty_bs, local_types,
+          all_reads, rewrite,
         )
         ignore(label_stack.pop())
-        live = lb
-        set_union_into(live, catch_live)
+        live.copy_from(lb)
+        if catch_active {
+          live.union_into(catch_live)
+        }
         if rewrite {
+          if !physical_equal(new_body, body) {
+            body_changed = true
+          }
           rev_out.push(Loop(bt, new_body))
         }
       }
       TryTable(bt, catches, body) => {
-        let exit_live = set_clone_u32(live)
-        let inner_catch = set_clone_u32(catch_live)
+        let exit_live = live.clone()
+        let inner_catch = catch_live.clone()
         for c in catches {
           let lbl = match c {
             Catch(_, l) | CatchRef(_, l) | CatchAll(l) | CatchAllRef(l) => l
           }
-          set_union_into(inner_catch, label_live_at(label_stack, lbl))
+          inner_catch.union_into(label_bitset_at(label_stack, lbl, empty_bs))
         }
+        let inner_active = catch_active || !inner_catch.is_zero()
         label_stack.push(exit_live)
         let (lb, new_body) = backward_liveness_dse(
-          body, exit_live, label_stack, inner_catch, local_types, all_reads, rewrite,
+          body, exit_live, label_stack, inner_catch, inner_active, empty_bs, local_types,
+          all_reads, rewrite,
         )
         ignore(label_stack.pop())
-        live = lb
-        set_union_into(live, catch_live)
+        live.copy_from(lb)
+        if catch_active {
+          live.union_into(catch_live)
+        }
         if rewrite {
+          if !physical_equal(new_body, body) {
+            body_changed = true
+          }
           rev_out.push(TryTable(bt, catches, new_body))
         }
       }
       other => {
-        set_union_into(live, catch_live)
+        if catch_active {
+          live.union_into(catch_live)
+        }
         if rewrite {
           rev_out.push(other)
         }
@@ -423,8 +579,8 @@ fn backward_liveness_dse(
     idx -= 1
   }
 
-  if !rewrite {
-    (live, [])
+  if !rewrite || !body_changed {
+    (live, instrs)
   } else {
     let out : Array[Instr] = []
     let mut k = rev_out.length() - 1
@@ -437,71 +593,90 @@ fn backward_liveness_dse(
 }
 
 ///|
-/// Pass 11: Straight-line copy/const propagation + exact backward structured Dead Local Store Elimination (DSE).
-pub fn pass_local_dse(mod : WasmModule) -> WasmModule {
+fn pass_local_dse_dirty(
+  mod : WasmModule,
+  dirty : Array[Bool]?,
+) -> (WasmModule, Array[Bool]) {
+  let out_changed : Array[Bool] = Array::make(mod.codes.length(), false)
   if mod.codes.is_empty() {
-    return mod
+    return (mod, out_changed)
   }
   let flat_types = mod.flat_types()
   let new_codes : Array[FuncBody] = []
   let mut changed = false
 
   for i, fb in mod.codes {
-    match build_func_local_types(mod, i, flat_types) {
-      None => new_codes.push(fb)
-      Some((_, local_types)) => {
-        if local_types.is_empty() {
-          new_codes.push(fb)
-          continue
-        }
-        let body1 = prop_copies_seq(fb.body, local_types)
-        let all_reads : Set[UInt32] = Set([])
-        collect_all_local_reads(body1, all_reads)
-        let label_stack : Array[Set[UInt32]] = [Set([])]
-        let (_, body2) = backward_liveness_dse(
-          body1,
-          Set([]),
-          label_stack,
-          Set([]),
-          local_types,
-          all_reads,
-          true,
-        )
-        let cand : FuncBody = { locals: fb.locals, body: body2, }
-        if cand != fb &&
-          encode_func_body(cand).length() <= encode_func_body(fb).length() {
-          changed = true
-          new_codes.push(cand)
-        } else {
-          new_codes.push(fb)
+    let run = match dirty {
+      Some(d) => d[i]
+      None => true
+    }
+    if run {
+      match build_func_local_types(mod, i, flat_types) {
+        None => new_codes.push(fb)
+        Some((_, local_types)) => {
+          let total = local_types.length()
+          if total == 0 {
+            new_codes.push(fb)
+            continue
+          }
+          let num_words = (total + 63) / 64
+          let body1 = prop_copies_seq(fb.body, local_types)
+          let all_reads = LocalBitSet::new(num_words)
+          collect_all_local_reads_bs(body1, all_reads)
+          let empty_bs = LocalBitSet::new(num_words)
+          let label_stack : Array[LocalBitSet] = [empty_bs]
+          let (_, body2) = backward_liveness_dse(
+            body1, empty_bs, label_stack, empty_bs, false, empty_bs, local_types,
+            all_reads, true,
+          )
+          if physical_equal(body2, fb.body) {
+            new_codes.push(fb)
+          } else {
+            let cand : FuncBody = { locals: fb.locals, body: body2, }
+            if cand != fb &&
+              encode_func_body(cand).length() <= encode_func_body(fb).length() {
+              changed = true
+              out_changed[i] = true
+              new_codes.push(cand)
+            } else {
+              new_codes.push(fb)
+            }
+          }
         }
       }
+    } else {
+      new_codes.push(fb)
     }
   }
 
   if !changed {
-    mod
+    (mod, out_changed)
   } else {
-    { ..mod, codes: new_codes, }
+    ({ ..mod, codes: new_codes, }, out_changed)
   }
 }
 
 ///|
-fn add_interf_edge(
-  interf : Map[UInt32, Set[UInt32]],
+/// Pass 11: Straight-line copy/const propagation + exact backward structured Dead Local Store Elimination (DSE).
+pub fn pass_local_dse(mod : WasmModule) -> WasmModule {
+  let (next, _) = pass_local_dse_dirty(mod, None)
+  next
+}
+
+///|
+fn add_interf_edge_matrix(
+  interf : FixedArray[LocalBitSet],
   a : UInt32,
   b : UInt32,
 ) -> Unit {
   if a == b {
     return
   }
-  match interf.get(a) {
-    Some(s) => s.add(b)
-    None => interf[a] = Set([b])
-  }
-  match interf.get(b) {
-    Some(s) => s.add(a)
-    None => interf[b] = Set([a])
+  let ai = a.reinterpret_as_int()
+  let bi = b.reinterpret_as_int()
+  if ai >= 0 && ai < interf.length() && bi >= 0 && bi < interf.length() {
+    interf[ai].add(b)
+    interf[bi].add(a)
   }
 }
 
@@ -525,19 +700,66 @@ fn add_move_affinity(
 }
 
 ///|
-/// Backward structured liveness that records exact def-vs-live_after interference edges and move affinities.
+/// Record interference between `x` (excluding `move_src`) and all bits currently set in `live`.
+fn record_interf_against_live(
+  interf : FixedArray[LocalBitSet],
+  x : Int32,
+  move_src : Int32,
+  live : LocalBitSet,
+  total_locals : Int32,
+) -> Unit {
+  if x < 0 || x >= total_locals {
+    return
+  }
+  let row = interf[x]
+  let nwords = live.words.length()
+  for wi in 0..<nwords {
+    let mut w = live.words[wi]
+    if wi == x >> 6 {
+      w = w & (1UL << (x & 63)).lnot()
+    }
+    if move_src >= 0 && wi == move_src >> 6 {
+      w = w & (1UL << (move_src & 63)).lnot()
+    }
+    if w == 0UL {
+      continue
+    }
+    row.words[wi] = row.words[wi] | w
+    let base = wi << 6
+    let mut bit_off = 0
+    while w != 0UL {
+      if (w & 1UL) != 0UL {
+        let v = base + bit_off
+        if v < total_locals {
+          interf[v].words[x >> 6] = interf[v].words[x >> 6] | (1UL << (x & 63))
+        }
+      }
+      w = w >> 1
+      bit_off += 1
+    }
+  }
+}
+
+///|
+/// Backward structured liveness that records dense bit-matrix interference edges and move affinities.
 fn backward_liveness_interf(
   instrs : Array[Instr],
-  live_after_exit : Set[UInt32],
-  label_stack : Array[Set[UInt32]],
-  catch_live : Set[UInt32],
+  live_after_exit : LocalBitSet,
+  label_stack : Array[LocalBitSet],
+  catch_live : LocalBitSet,
+  catch_active : Bool,
+  empty_bs : LocalBitSet,
   record : Bool,
-  interf : Map[UInt32, Set[UInt32]],
+  total_locals : Int32,
+  interf : FixedArray[LocalBitSet],
   aff : Map[UInt32, Map[UInt32, Int32]],
-) -> Set[UInt32] {
+) -> LocalBitSet {
   let n = instrs.length()
-  let mut live = set_clone_u32(live_after_exit)
-  set_union_into(live, catch_live)
+  let num_words = live_after_exit.words.length()
+  let live = live_after_exit.clone()
+  if catch_active {
+    live.union_into(catch_live)
+  }
 
   let mut idx = n - 1
   while idx >= 0 {
@@ -549,146 +771,161 @@ fn backward_liveness_interf(
       | ThrowRef
       | ReturnCall(_)
       | ReturnCallIndirect(_, _)
-      | ReturnCallRef(_) => live = set_clone_u32(catch_live)
+      | ReturnCallRef(_) =>
+        if catch_active {
+          live.copy_from(catch_live)
+        } else {
+          live.clear_all()
+        }
       Br(l) => {
-        live = set_clone_u32(label_live_at(label_stack, l))
-        set_union_into(live, catch_live)
+        live.copy_from(label_bitset_at(label_stack, l, empty_bs))
+        if catch_active {
+          live.union_into(catch_live)
+        }
       }
       BrTable(ts, d) => {
-        let next_live = set_clone_u32(label_live_at(label_stack, d))
+        live.copy_from(label_bitset_at(label_stack, d, empty_bs))
         for t in ts {
-          set_union_into(next_live, label_live_at(label_stack, t))
+          live.union_into(label_bitset_at(label_stack, t, empty_bs))
         }
-        set_union_into(next_live, catch_live)
-        live = next_live
+        if catch_active {
+          live.union_into(catch_live)
+        }
       }
       BrIf(l)
       | BrOnNull(l)
       | BrOnNonNull(l)
       | BrOnCast(_, l, _, _)
       | BrOnCastFail(_, l, _, _) => {
-        set_union_into(live, label_live_at(label_stack, l))
-        set_union_into(live, catch_live)
+        live.union_into(label_bitset_at(label_stack, l, empty_bs))
+        if catch_active {
+          live.union_into(catch_live)
+        }
       }
       LocalGet(x) => live.add(x)
       LocalSet(x) | LocalTee(x) => {
         if record {
-          let move_src : UInt32? = if idx > 0 {
+          let move_src : Int32 = if idx > 0 {
             match instrs[idx - 1] {
-              LocalGet(s) => Some(s)
-              _ => None
+              LocalGet(s) => {
+                add_move_affinity(aff, x, s)
+                s.reinterpret_as_int()
+              }
+              _ => -1
             }
           } else {
-            None
+            -1
           }
-          match move_src {
-            Some(s) => add_move_affinity(aff, x, s)
-            None => ()
-          }
-          for v in live {
-            if v != x && Some(v) != move_src {
-              add_interf_edge(interf, x, v)
-            }
-          }
+          record_interf_against_live(
+            interf,
+            x.reinterpret_as_int(),
+            move_src,
+            live,
+            total_locals,
+          )
         }
         live.remove(x)
-        set_union_into(live, catch_live)
+        if catch_active {
+          live.union_into(catch_live)
+        }
       }
       Block(_, body) => {
-        let exit_live = set_clone_u32(live)
+        let exit_live = live.clone()
         label_stack.push(exit_live)
-        live = backward_liveness_interf(
-          body, exit_live, label_stack, catch_live, record, interf, aff,
+        live.copy_from(
+          backward_liveness_interf(
+            body, exit_live, label_stack, catch_live, catch_active, empty_bs, record,
+            total_locals, interf, aff,
+          ),
         )
         ignore(label_stack.pop())
-        set_union_into(live, catch_live)
+        if catch_active {
+          live.union_into(catch_live)
+        }
       }
       If(_, then_b, else_b) => {
-        let exit_live = set_clone_u32(live)
+        let exit_live = live.clone()
         label_stack.push(exit_live)
         let lt = backward_liveness_interf(
-          then_b, exit_live, label_stack, catch_live, record, interf, aff,
+          then_b, exit_live, label_stack, catch_live, catch_active, empty_bs, record,
+          total_locals, interf, aff,
         )
         let le = if else_b.is_empty() {
-          set_clone_u32(exit_live)
+          exit_live
         } else {
           backward_liveness_interf(
-            else_b, exit_live, label_stack, catch_live, record, interf, aff,
+            else_b, exit_live, label_stack, catch_live, catch_active, empty_bs, record,
+            total_locals, interf, aff,
           )
         }
         ignore(label_stack.pop())
-        set_union_into(lt, le)
-        set_union_into(lt, catch_live)
-        live = lt
+        live.copy_from(lt)
+        live.union_into(le)
+        if catch_active {
+          live.union_into(catch_live)
+        }
       }
       Loop(_, body) => {
-        let exit_live = set_clone_u32(live)
-        let mut head_live : Set[UInt32] = Set([])
+        let exit_live = live.clone()
+        let head_live = LocalBitSet::new(num_words)
         let mut converged = false
         for _ in 0..<64 {
           label_stack.push(head_live)
           let cand = backward_liveness_interf(
-            body, exit_live, label_stack, catch_live, false, interf, aff,
+            body, exit_live, label_stack, catch_live, catch_active, empty_bs, false,
+            total_locals, interf, aff,
           )
           ignore(label_stack.pop())
-          set_union_into(cand, head_live)
-          if set_equal_u32(cand, head_live) {
+          cand.union_into(head_live)
+          if cand.equals(head_live) {
             converged = true
             break
           }
-          head_live = cand
+          head_live.copy_from(cand)
         }
         if !converged {
-          collect_all_local_reads(body, head_live)
-          set_union_into(head_live, exit_live)
+          collect_all_local_reads_bs(body, head_live)
+          head_live.union_into(exit_live)
         }
         label_stack.push(head_live)
-        live = backward_liveness_interf(
-          body, exit_live, label_stack, catch_live, record, interf, aff,
+        live.copy_from(
+          backward_liveness_interf(
+            body, exit_live, label_stack, catch_live, catch_active, empty_bs, record,
+            total_locals, interf, aff,
+          ),
         )
         ignore(label_stack.pop())
-        set_union_into(live, catch_live)
+        if catch_active {
+          live.union_into(catch_live)
+        }
       }
       TryTable(_, catches, body) => {
-        let exit_live = set_clone_u32(live)
-        let inner_catch = set_clone_u32(catch_live)
+        let exit_live = live.clone()
+        let inner_catch = catch_live.clone()
         for c in catches {
           let lbl = match c {
             Catch(_, l) | CatchRef(_, l) | CatchAll(l) | CatchAllRef(l) => l
           }
-          set_union_into(inner_catch, label_live_at(label_stack, lbl))
+          inner_catch.union_into(label_bitset_at(label_stack, lbl, empty_bs))
         }
+        let inner_active = catch_active || !inner_catch.is_zero()
         label_stack.push(exit_live)
-        live = backward_liveness_interf(
-          body, exit_live, label_stack, inner_catch, record, interf, aff,
+        live.copy_from(
+          backward_liveness_interf(
+            body, exit_live, label_stack, inner_catch, inner_active, empty_bs, record,
+            total_locals, interf, aff,
+          ),
         )
         ignore(label_stack.pop())
-        set_union_into(live, catch_live)
+        if catch_active {
+          live.union_into(catch_live)
+        }
       }
-      _ => set_union_into(live, catch_live)
+      _ => if catch_active { live.union_into(catch_live) }
     }
     idx -= 1
   }
   live
-}
-
-///|
-fn interferes_with_any(
-  x : UInt32,
-  members : Array[UInt32],
-  interf : Map[UInt32, Set[UInt32]],
-) -> Bool {
-  match interf.get(x) {
-    None => false
-    Some(adj) => {
-      for m in members {
-        if adj.contains(m) {
-          return true
-        }
-      }
-      false
-    }
-  }
 }
 
 ///|
@@ -706,15 +943,20 @@ fn coalesce_func_locals(
   let uses : Map[UInt32, Int32] = Map([])
   count_local_uses(fb.body, uses)
 
-  let interf : Map[UInt32, Set[UInt32]] = Map([])
+  let num_words = (total + 63) / 64
+  let interf = FixedArray::makei(total, _ => LocalBitSet::new(num_words))
   let aff : Map[UInt32, Map[UInt32, Int32]] = Map([])
-  let label_stack : Array[Set[UInt32]] = [Set([])]
+  let empty_bs = LocalBitSet::new(num_words)
+  let label_stack : Array[LocalBitSet] = [empty_bs]
   let entry_live = backward_liveness_interf(
     fb.body,
-    Set([]),
+    empty_bs,
     label_stack,
-    Set([]),
+    empty_bs,
+    false,
+    empty_bs,
     true,
+    total,
     interf,
     aff,
   )
@@ -724,26 +966,32 @@ fn coalesce_func_locals(
   for p in 0..<p_len {
     entry_list.push(p.reinterpret_as_uint())
   }
-  for v in entry_live {
-    if v >= param_count {
+  for idx in p_len..<total {
+    let v = idx.reinterpret_as_uint()
+    if entry_live.contains(v) {
       entry_list.push(v)
     }
   }
   for i in 0..<entry_list.length() {
     for j in (i + 1)..<entry_list.length() {
-      add_interf_edge(interf, entry_list[i], entry_list[j])
+      add_interf_edge_matrix(interf, entry_list[i], entry_list[j])
     }
   }
 
   // Color slots: 0..<p_len are fixed parameter slots; colors >= p_len are newly allocated non-param slots
   let color_type : Array[ValType] = []
   let color_members : Array[Array[UInt32]] = []
+  let color_bitsets : Array[LocalBitSet] = []
   let assigned : Map[UInt32, Int32] = Map([])
 
   for p in 0..<p_len {
+    let pu = p.reinterpret_as_uint()
     color_type.push(local_types[p])
-    color_members.push([p.reinterpret_as_uint()])
-    assigned[p.reinterpret_as_uint()] = p
+    color_members.push([pu])
+    let cbs = LocalBitSet::new(num_words)
+    cbs.add(pu)
+    color_bitsets.push(cbs)
+    assigned[pu] = p
   }
 
   // Pin non-param locals that rely on zero-initialization (`entry_live`) to dedicated non-param colors first
@@ -758,6 +1006,9 @@ fn coalesce_func_locals(
       let c = color_type.length()
       color_type.push(local_types[idx])
       color_members.push([l])
+      let cbs = LocalBitSet::new(num_words)
+      cbs.add(l)
+      color_bitsets.push(cbs)
       assigned[l] = c
     } else {
       candidates.push((l, u))
@@ -780,23 +1031,23 @@ fn coalesce_func_locals(
 
   for item in candidates {
     let (l, _) = item
-    let vt = local_types[l.reinterpret_as_int()]
+    let li = l.reinterpret_as_int()
+    let vt = local_types[li]
+    let row = interf[li]
     let mut best_color = -1
     let mut best_score = -1
 
-    // Score existing colors of exact same ValType (prefer copy-affinity partner & lowest slot index)
     let aff_map = aff.get(l)
     for c in 0..<color_type.length() {
       if color_type[c] != vt {
         continue
       }
-      // Never merge into a pinned zero-init non-param local's color
       if c >= p_len &&
         !color_members[c].is_empty() &&
         entry_live.contains(color_members[c][0]) {
         continue
       }
-      if interferes_with_any(l, color_members[c], interf) {
+      if row.intersects(color_bitsets[c]) {
         continue
       }
       let mut score = 0
@@ -807,7 +1058,6 @@ fn coalesce_func_locals(
           }
         None => ()
       }
-      // Prefer reusing parameter slots (< p_len) and 1-byte LEB128 slots (< 128)
       if c < p_len {
         score += 10
       } else if c < 128 {
@@ -821,11 +1071,15 @@ fn coalesce_func_locals(
 
     if best_color >= 0 {
       color_members[best_color].push(l)
+      color_bitsets[best_color].add(l)
       assigned[l] = best_color
     } else {
       let c = color_type.length()
       color_type.push(vt)
       color_members.push([l])
+      let cbs = LocalBitSet::new(num_words)
+      cbs.add(l)
+      color_bitsets.push(cbs)
       assigned[l] = c
     }
   }
@@ -833,7 +1087,6 @@ fn coalesce_func_locals(
   let new_non_param_count = color_type.length() - p_len
   let old_non_param_count = total - p_len
 
-  // Build final local remap & compact LocalGroups
   let remap : Map[UInt32, UInt32] = Map([])
   let mut any_remapped = false
   for l, c in assigned {
@@ -855,7 +1108,6 @@ fn coalesce_func_locals(
     locals: compress_local_types(new_non_param_types),
     body: remap_locals_in_instrs(fb.body, remap),
   }
-  // Keep candidate whenever encoded size shrinks OR local count strictly decreased without bloating size
   let old_sz = encode_func_body(fb).length()
   let new_sz = encode_func_body(candidate).length()
   if new_sz < old_sz ||
@@ -867,32 +1119,53 @@ fn coalesce_func_locals(
 }
 
 ///|
-/// Pass 12: Interference-graph & copy-affinity greedy graph-coloring local slot coalescing.
-/// Safely pins zero-init entry-live locals, preserves parameter ABI indices, and enforces exact ValType & size profitability.
-pub fn pass_coalesce_locals(mod : WasmModule) -> WasmModule {
+fn pass_coalesce_locals_dirty(
+  mod : WasmModule,
+  dirty : Array[Bool]?,
+) -> (WasmModule, Array[Bool]) {
+  let out_changed : Array[Bool] = Array::make(mod.codes.length(), false)
   if mod.codes.is_empty() {
-    return mod
+    return (mod, out_changed)
   }
   let flat_types = mod.flat_types()
   let new_codes : Array[FuncBody] = []
   let mut changed = false
 
   for i, fb in mod.codes {
-    match build_func_local_types(mod, i, flat_types) {
-      None => new_codes.push(fb)
-      Some((pcnt, local_types)) => {
-        let opt_fb = coalesce_func_locals(fb, pcnt, local_types)
-        if opt_fb != fb {
-          changed = true
+    let run = match dirty {
+      Some(d) => d[i]
+      None => true
+    }
+    if run {
+      match build_func_local_types(mod, i, flat_types) {
+        None => new_codes.push(fb)
+        Some((pcnt, local_types)) => {
+          let opt_fb = coalesce_func_locals(fb, pcnt, local_types)
+          if !physical_equal(opt_fb, fb) && opt_fb != fb {
+            changed = true
+            out_changed[i] = true
+            new_codes.push(opt_fb)
+          } else {
+            new_codes.push(fb)
+          }
         }
-        new_codes.push(opt_fb)
       }
+    } else {
+      new_codes.push(fb)
     }
   }
 
   if !changed {
-    mod
+    (mod, out_changed)
   } else {
-    { ..mod, codes: new_codes, }
+    ({ ..mod, codes: new_codes, }, out_changed)
   }
+}
+
+///|
+/// Pass 12: BitSet interference-graph & copy-affinity greedy graph-coloring local slot coalescing.
+/// Safely pins zero-init entry-live locals, preserves parameter ABI indices, and enforces exact ValType & size profitability.
+pub fn pass_coalesce_locals(mod : WasmModule) -> WasmModule {
+  let (next, _) = pass_coalesce_locals_dirty(mod, None)
+  next
 }

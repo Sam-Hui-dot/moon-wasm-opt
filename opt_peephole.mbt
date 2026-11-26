@@ -26,7 +26,8 @@ fn is_pure_single_push(ins : Instr) -> Bool {
     | RefNull(_)
     | RefFunc(_)
     | MemorySize(_)
-    | TableSize(_) => true
+    | TableSize(_)
+    | SimdV128Const(_) => true
     _ => false
   }
 }
@@ -132,16 +133,24 @@ fn dec_branch_depths(instrs : Array[Instr], min_depth : UInt32) -> Array[Instr] 
 ///|
 fn dce_instr_seq(instrs : Array[Instr]) -> Array[Instr] {
   let out : Array[Instr] = []
+  let mut changed = false
   for ins in instrs {
     match ins {
-      Nop => continue
+      Nop => {
+        changed = true
+        continue
+      }
       Block(bt, body) => {
         let nb = dce_instr_seq(body)
+        if !physical_equal(nb, body) {
+          changed = true
+        }
         if nb.is_empty() && bt == Empty {
+          changed = true
           continue
         }
-        // Unwrap any block that has no branch targeting depth 0 (safe for Empty or single Val result).
         if !instrs_branch_to_depth(nb, 0U) {
+          changed = true
           let unwrapped = dec_branch_depths(nb, 1U)
           for u in unwrapped {
             out.push(u)
@@ -155,10 +164,15 @@ fn dce_instr_seq(instrs : Array[Instr]) -> Array[Instr] {
       }
       Loop(bt, body) => {
         let nb = dce_instr_seq(body)
+        if !physical_equal(nb, body) {
+          changed = true
+        }
         if nb.is_empty() && bt == Empty {
+          changed = true
           continue
         }
         if !instrs_branch_to_depth(nb, 0U) {
+          changed = true
           let unwrapped = dec_branch_depths(nb, 1U)
           for u in unwrapped {
             out.push(u)
@@ -173,7 +187,11 @@ fn dce_instr_seq(instrs : Array[Instr]) -> Array[Instr] {
       If(bt, then_b, else_b) => {
         let nt = dce_instr_seq(then_b)
         let ne = dce_instr_seq(else_b)
+        if !physical_equal(nt, then_b) || !physical_equal(ne, else_b) {
+          changed = true
+        }
         if nt.is_empty() && ne.is_empty() && bt == Empty {
+          changed = true
           out.push(Drop)
         } else {
           out.push(If(bt, nt, ne))
@@ -181,27 +199,65 @@ fn dce_instr_seq(instrs : Array[Instr]) -> Array[Instr] {
       }
       TryTable(bt, catches, body) => {
         let nb = dce_instr_seq(body)
+        if !physical_equal(nb, body) {
+          changed = true
+        }
         out.push(TryTable(bt, catches, nb))
       }
       other => {
         out.push(other)
         if is_unconditional_terminator(other) {
-          return out
+          if out.length() < instrs.length() {
+            return out
+          }
+          return if changed { out } else { instrs }
         }
       }
     }
   }
-  out
+  if !changed {
+    instrs
+  } else {
+    out
+  }
+}
+
+///|
+fn pass_dce_instr_dirty(
+  mod : WasmModule,
+  dirty : Array[Bool]?,
+) -> (WasmModule, Array[Bool]) {
+  let out_changed : Array[Bool] = Array::make(mod.codes.length(), false)
+  let new_codes : Array[FuncBody] = []
+  let mut any = false
+  for i, fb in mod.codes {
+    let run = match dirty {
+      Some(d) => d[i]
+      None => true
+    }
+    if run {
+      let nb = dce_instr_seq(fb.body)
+      if !physical_equal(nb, fb.body) && nb != fb.body {
+        any = true
+        out_changed[i] = true
+        new_codes.push({ locals: fb.locals, body: nb, })
+        continue
+      }
+    }
+    new_codes.push(fb)
+  }
+  if !any {
+    (mod, out_changed)
+  } else {
+    ({ ..mod, codes: new_codes, }, out_changed)
+  }
 }
 
 ///|
 /// Pass 2: Eliminate nops, unreachable trailing instructions, and redundant single-entry blocks.
 pub fn pass_dce_instr(mod : WasmModule) -> WasmModule {
-  let new_codes : Array[FuncBody] = []
-  for fb in mod.codes {
-    new_codes.push({ locals: fb.locals, body: dce_instr_seq(fb.body), })
-  }
-  { ..mod, codes: new_codes, }
+  let (next, _) = pass_dce_instr_dirty(mod, None)
+  next
 }
 
 ///|
@@ -374,18 +430,45 @@ fn is_bool_result_op(op : Byte) -> Bool {
 fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
   // Recursively optimize nested blocks first
   let staged : Array[Instr] = []
+  let mut child_changed = false
   for ins in instrs {
     match ins {
-      Block(bt, b) => staged.push(Block(bt, peephole_seq(b)))
-      Loop(bt, b) => staged.push(Loop(bt, peephole_seq(b)))
-      If(bt, t, e) => staged.push(If(bt, peephole_seq(t), peephole_seq(e)))
-      TryTable(bt, c, b) => staged.push(TryTable(bt, c, peephole_seq(b)))
+      Block(bt, b) => {
+        let nb = peephole_seq(b)
+        if !physical_equal(nb, b) {
+          child_changed = true
+        }
+        staged.push(Block(bt, nb))
+      }
+      Loop(bt, b) => {
+        let nb = peephole_seq(b)
+        if !physical_equal(nb, b) {
+          child_changed = true
+        }
+        staged.push(Loop(bt, nb))
+      }
+      If(bt, t, e) => {
+        let nt = peephole_seq(t)
+        let ne = peephole_seq(e)
+        if !physical_equal(nt, t) || !physical_equal(ne, e) {
+          child_changed = true
+        }
+        staged.push(If(bt, nt, ne))
+      }
+      TryTable(bt, c, b) => {
+        let nb = peephole_seq(b)
+        if !physical_equal(nb, b) {
+          child_changed = true
+        }
+        staged.push(TryTable(bt, c, nb))
+      }
       other => staged.push(other)
     }
   }
 
   // Stack-based sliding peephole rewriter (iterates to local fixpoint)
   let out : Array[Instr] = []
+  let mut local_changed = false
   for raw_ins in staged {
     out.push(raw_ins)
     let mut reduced = true
@@ -403,6 +486,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
               ignore(out.pop())
               ignore(out.pop())
               out.push(if c != 0 { v1 } else { v2 })
+              local_changed = true
               reduced = true
               continue
             }
@@ -419,6 +503,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
                 ignore(out.pop())
                 ignore(out.pop())
                 out.push(folded)
+                local_changed = true
                 reduced = true
                 continue
               }
@@ -431,15 +516,16 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
                 ignore(out.pop())
                 ignore(out.pop())
                 out.push(folded)
+                local_changed = true
                 reduced = true
                 continue
               }
               None => ()
             }
           (NumOp(op), NumOp(b'\x45'), NumOp(b'\x45')) if is_bool_result_op(op) => {
-            // Double negation of a guaranteed 0/1 comparison or eqz is a no-op
             ignore(out.pop())
             ignore(out.pop())
+            local_changed = true
             reduced = true
             continue
           }
@@ -455,6 +541,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
                 ignore(out.pop())
                 ignore(out.pop())
                 out.push(folded)
+                local_changed = true
                 reduced = true
                 continue
               }
@@ -462,24 +549,27 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
                 if a == 0 && is_i32_zero_identity(op) {
                   ignore(out.pop())
                   ignore(out.pop())
+                  local_changed = true
                   reduced = true
                   continue
                 } else if a == 0 && op == b'\x46' {
-                  // i32.const 0; i32.eq -> i32.eqz (saves 2 bytes)
                   ignore(out.pop())
                   ignore(out.pop())
                   out.push(NumOp(b'\x45'))
+                  local_changed = true
                   reduced = true
                   continue
                 } else if a == 1 &&
                   (op == b'\x6C' || op == b'\x6D' || op == b'\x6E') {
                   ignore(out.pop())
                   ignore(out.pop())
+                  local_changed = true
                   reduced = true
                   continue
                 } else if a == -1 && op == b'\x71' {
                   ignore(out.pop())
                   ignore(out.pop())
+                  local_changed = true
                   reduced = true
                   continue
                 }
@@ -490,6 +580,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
                 ignore(out.pop())
                 ignore(out.pop())
                 out.push(folded)
+                local_changed = true
                 reduced = true
                 continue
               }
@@ -497,24 +588,27 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
                 if a == 0L && is_i64_zero_identity(op) {
                   ignore(out.pop())
                   ignore(out.pop())
+                  local_changed = true
                   reduced = true
                   continue
                 } else if a == 0L && op == b'\x51' {
-                  // i64.const 0; i64.eq -> i64.eqz (saves 2 bytes)
                   ignore(out.pop())
                   ignore(out.pop())
                   out.push(NumOp(b'\x50'))
+                  local_changed = true
                   reduced = true
                   continue
                 } else if a == 1L &&
                   (op == b'\x7E' || op == b'\x7F' || op == b'\x80') {
                   ignore(out.pop())
                   ignore(out.pop())
+                  local_changed = true
                   reduced = true
                   continue
                 } else if a == -1L && op == b'\x83' {
                   ignore(out.pop())
                   ignore(out.pop())
+                  local_changed = true
                   reduced = true
                   continue
                 }
@@ -524,6 +618,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             ignore(out.pop())
             ignore(out.pop())
             out.push(LocalTee(x))
+            local_changed = true
             reduced = true
             continue
           }
@@ -531,12 +626,14 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             ignore(out.pop())
             ignore(out.pop())
             out.push(LocalSet(x))
+            local_changed = true
             reduced = true
             continue
           }
           (LocalGet(x), LocalSet(y)) if x == y => {
             ignore(out.pop())
             ignore(out.pop())
+            local_changed = true
             reduced = true
             continue
           }
@@ -544,6 +641,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             ignore(out.pop())
             ignore(out.pop())
             out.push(LocalSet(x))
+            local_changed = true
             reduced = true
             continue
           }
@@ -551,6 +649,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
           (prev, Drop) if is_pure_single_push(prev) => {
             ignore(out.pop())
             ignore(out.pop())
+            local_changed = true
             reduced = true
             continue
           }
@@ -561,6 +660,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
                 ignore(out.pop())
                 ignore(out.pop())
                 out.push(NumOp(inv))
+                local_changed = true
                 reduced = true
                 continue
               }
@@ -573,6 +673,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             if c != 0 {
               out.push(Br(lbl))
             }
+            local_changed = true
             reduced = true
             continue
           }
@@ -585,6 +686,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
               def_lbl
             }
             out.push(Br(chosen))
+            local_changed = true
             reduced = true
             continue
           }
@@ -593,12 +695,14 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             ignore(out.pop())
             let chosen = if c != 0 { then_b } else { else_b }
             out.push(Block(bt, chosen))
+            local_changed = true
             reduced = true
             continue
           }
           // WasmGC non-null peepholes
           (RefAsNonNull, RefAsNonNull) => {
             ignore(out.pop())
+            local_changed = true
             reduced = true
             continue
           }
@@ -606,6 +710,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             ignore(out.pop())
             ignore(out.pop())
             out.push(StructNew(t))
+            local_changed = true
             reduced = true
             continue
           }
@@ -613,6 +718,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             ignore(out.pop())
             ignore(out.pop())
             out.push(StructNewDefault(t))
+            local_changed = true
             reduced = true
             continue
           }
@@ -620,6 +726,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             ignore(out.pop())
             ignore(out.pop())
             out.push(ArrayNew(t))
+            local_changed = true
             reduced = true
             continue
           }
@@ -627,6 +734,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             ignore(out.pop())
             ignore(out.pop())
             out.push(ArrayNewDefault(t))
+            local_changed = true
             reduced = true
             continue
           }
@@ -634,6 +742,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             ignore(out.pop())
             ignore(out.pop())
             out.push(ArrayNewFixed(t, len))
+            local_changed = true
             reduced = true
             continue
           }
@@ -641,6 +750,7 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
             ignore(out.pop())
             ignore(out.pop())
             out.push(RefI31)
+            local_changed = true
             reduced = true
             continue
           }
@@ -649,15 +759,47 @@ fn peephole_seq(instrs : Array[Instr]) -> Array[Instr] {
       }
     }
   }
-  out
+  if !child_changed && !local_changed {
+    instrs
+  } else {
+    out
+  }
+}
+
+///|
+fn pass_peephole_dirty(
+  mod : WasmModule,
+  dirty : Array[Bool]?,
+) -> (WasmModule, Array[Bool]) {
+  let out_changed : Array[Bool] = Array::make(mod.codes.length(), false)
+  let new_codes : Array[FuncBody] = []
+  let mut any = false
+  for i, fb in mod.codes {
+    let run = match dirty {
+      Some(d) => d[i]
+      None => true
+    }
+    if run {
+      let nb = peephole_seq(fb.body)
+      if !physical_equal(nb, fb.body) && nb != fb.body {
+        any = true
+        out_changed[i] = true
+        new_codes.push({ locals: fb.locals, body: nb, })
+        continue
+      }
+    }
+    new_codes.push(fb)
+  }
+  if !any {
+    (mod, out_changed)
+  } else {
+    ({ ..mod, codes: new_codes, }, out_changed)
+  }
 }
 
 ///|
 /// Pass 3: Constant folding, algebraic identities, local.tee fusion, constant branch folding, and WasmGC peepholes.
 pub fn pass_peephole(mod : WasmModule) -> WasmModule {
-  let new_codes : Array[FuncBody] = []
-  for fb in mod.codes {
-    new_codes.push({ locals: fb.locals, body: peephole_seq(fb.body), })
-  }
-  { ..mod, codes: new_codes, }
+  let (next, _) = pass_peephole_dirty(mod, None)
+  next
 }

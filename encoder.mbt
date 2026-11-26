@@ -645,9 +645,46 @@ fn encode_name_section(
 }
 
 ///|
-/// Encode a `WasmModule` back into a spec-compliant WebAssembly 2.0 / WasmGC binary.
-pub fn encode_module(mod : WasmModule) -> Bytes {
+fn uleb128_u32_len(val : UInt32) -> Int32 {
+  let mut v = val
+  let mut n = 1
+  while v >= 0x80U {
+    v = v >> 7
+    n += 1
+  }
+  n
+}
+
+///|
+fn code_section_total_len(body_lens : Array[Int32]) -> Int32 {
+  if body_lens.is_empty() {
+    return 0
+  }
+  let mut payload_len = uleb128_u32_len(
+    body_lens.length().reinterpret_as_uint(),
+  )
+  for blen in body_lens {
+    payload_len += uleb128_u32_len(blen.reinterpret_as_uint()) + blen
+  }
+  1 + uleb128_u32_len(payload_len.reinterpret_as_uint()) + payload_len
+}
+
+///|
+fn encode_non_code_prefix_len(mod : WasmModule) -> Int32 {
   let out = BinWriter::new()
+  write_module_prefix(mod, out)
+  out.to_bytes().length()
+}
+
+///|
+fn encode_non_code_suffix_len(mod : WasmModule) -> Int32 {
+  let out = BinWriter::new()
+  write_module_suffix(mod, out)
+  out.to_bytes().length()
+}
+
+///|
+fn write_module_prefix(mod : WasmModule, out : BinWriter) -> Unit {
   // Magic + version 1
   out.write_bytes(b"\x00\x61\x73\x6D\x01\x00\x00\x00")
 
@@ -828,19 +865,10 @@ pub fn encode_module(mod : WasmModule) -> Bytes {
     s.write_u32(mod.datas.length().reinterpret_as_uint())
     out.write_section(b'\x0C', s.to_bytes())
   }
+}
 
-  // 10. Code section
-  if !mod.codes.is_empty() {
-    let s = BinWriter::new()
-    s.write_u32(mod.codes.length().reinterpret_as_uint())
-    for fb in mod.codes {
-      let body_bytes = encode_func_body(fb)
-      s.write_u32(body_bytes.length().reinterpret_as_uint())
-      s.write_bytes(body_bytes)
-    }
-    out.write_section(b'\x0A', s.to_bytes())
-  }
-
+///|
+fn write_module_suffix(mod : WasmModule, out : BinWriter) -> Unit {
   // 11. Data section
   if !mod.datas.is_empty() {
     let s = BinWriter::new()
@@ -867,7 +895,27 @@ pub fn encode_module(mod : WasmModule) -> Bytes {
     s.write_bytes(cs.payload)
     out.write_section(b'\x00', s.to_bytes())
   }
+}
 
+///|
+/// Encode a `WasmModule` back into a spec-compliant WebAssembly 2.0 / WasmGC binary.
+pub fn encode_module(mod : WasmModule) -> Bytes {
+  let out = BinWriter::new()
+  write_module_prefix(mod, out)
+
+  // 10. Code section
+  if !mod.codes.is_empty() {
+    let s = BinWriter::new()
+    s.write_u32(mod.codes.length().reinterpret_as_uint())
+    for fb in mod.codes {
+      let body_bytes = encode_func_body(fb)
+      s.write_u32(body_bytes.length().reinterpret_as_uint())
+      s.write_bytes(body_bytes)
+    }
+    out.write_section(b'\x0A', s.to_bytes())
+  }
+
+  write_module_suffix(mod, out)
   out.to_bytes()
 }
 

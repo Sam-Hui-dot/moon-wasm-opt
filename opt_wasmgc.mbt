@@ -771,10 +771,13 @@ fn wasmgc_opt_seq(
 }
 
 ///|
-/// Pass 13b: WasmGC static/dynamic reference optimization: redundant `ref.cast`/`ref.as_non_null` elimination, `call_ref` devirtualization, `ref.is_null`/`ref.test` folding, and `i31` constant folding.
-pub fn pass_wasmgc_opt(mod : WasmModule) -> WasmModule {
+fn pass_wasmgc_opt_dirty(
+  mod : WasmModule,
+  dirty : Array[Bool]?,
+) -> (WasmModule, Array[Bool]) {
+  let out_changed : Array[Bool] = Array::make(mod.codes.length(), false)
   if mod.codes.is_empty() {
-    return mod
+    return (mod, out_changed)
   }
   let flat_types = mod.flat_types()
   let global_types = build_all_global_types(mod)
@@ -782,22 +785,42 @@ pub fn pass_wasmgc_opt(mod : WasmModule) -> WasmModule {
   let mut changed = false
 
   for i, fb in mod.codes {
-    let local_types = match build_func_local_types(mod, i, flat_types) {
-      Some((_, lts)) => lts
-      None => []
+    let run = match dirty {
+      Some(d) => d[i]
+      None => true
     }
-    let nb = wasmgc_opt_seq(fb.body, local_types, global_types, flat_types, mod)
-    if nb != fb.body {
-      changed = true
-      new_codes.push({ locals: fb.locals, body: nb, })
-    } else {
-      new_codes.push(fb)
+    if run {
+      let local_types = match build_func_local_types(mod, i, flat_types) {
+        Some((_, lts)) => lts
+        None => []
+      }
+      let nb = wasmgc_opt_seq(
+        fb.body,
+        local_types,
+        global_types,
+        flat_types,
+        mod,
+      )
+      if nb != fb.body {
+        changed = true
+        out_changed[i] = true
+        new_codes.push({ locals: fb.locals, body: nb, })
+        continue
+      }
     }
+    new_codes.push(fb)
   }
 
   if !changed {
-    mod
+    (mod, out_changed)
   } else {
-    { ..mod, codes: new_codes, }
+    ({ ..mod, codes: new_codes, }, out_changed)
   }
+}
+
+///|
+/// Pass 13b: WasmGC static/dynamic reference optimization: redundant `ref.cast`/`ref.as_non_null` elimination, `call_ref` devirtualization, `ref.is_null`/`ref.test` folding, and `i31` constant folding.
+pub fn pass_wasmgc_opt(mod : WasmModule) -> WasmModule {
+  let (next, _) = pass_wasmgc_opt_dirty(mod, None)
+  next
 }

@@ -40,6 +40,9 @@ pub(all) struct OptConfig {
   enable_module_dce : Bool
   enable_icf : Bool
   enable_opt_data : Bool
+  enable_code_folding : Bool
+  enable_write_only_globals : Bool
+  enable_simd : Bool
 }
 
 ///|
@@ -85,6 +88,9 @@ pub fn opt_config(
         enable_module_dce: false,
         enable_icf: false,
         enable_opt_data: false,
+        enable_code_folding: false,
+        enable_write_only_globals: true,
+        enable_simd: true,
       }
     O2 =>
       {
@@ -107,6 +113,9 @@ pub fn opt_config(
         enable_module_dce: true,
         enable_icf: false,
         enable_opt_data: true,
+        enable_code_folding: true,
+        enable_write_only_globals: true,
+        enable_simd: true,
       }
     Os | Oz =>
       {
@@ -129,6 +138,9 @@ pub fn opt_config(
         enable_module_dce: true,
         enable_icf: true,
         enable_opt_data: true,
+        enable_code_folding: true,
+        enable_write_only_globals: true,
+        enable_simd: true,
       }
   }
 }
@@ -221,42 +233,172 @@ pub fn optimize_bytes(
   let is_gc = module_uses_wasmgc(initial)
 
   let mut cur = initial
-  let mut cur_bytes = encode_module(cur)
+  let mut prefix_len = encode_non_code_prefix_len(cur)
+  let mut suffix_len = encode_non_code_suffix_len(cur)
+  let mut body_lens : Array[Int32] = cur.codes.map(fb => {
+    encode_func_body(fb).length()
+  })
   let mut cur_len = before_bytes
   let passes : Array[PassStats] = []
 
-  fn run_pass(
+  // Per-pass dirty function bitmasks (`0..8`) eliminate scanning already-converged functions across cleanup & rounds
+  let num_dirty_tracks = 9
+  let pass_dirty : Array[Array[Bool]] = Array::makei(num_dirty_tracks, _ => {
+    Array::make(cur.codes.length(), true)
+  })
+  let mut icf_needed = true
+
+  fn reset_all_dirty(n : Int32) -> Unit {
+    for k in 0..<num_dirty_tracks {
+      pass_dirty[k] = Array::make(n, true)
+    }
+    icf_needed = true
+  }
+
+  fn propagate_dirty(skip_track : Int32, changed_mask : Array[Bool]) -> Unit {
+    let n = changed_mask.length()
+    for i in 0..<n {
+      if changed_mask[i] {
+        icf_needed = true
+        for k in 0..<num_dirty_tracks {
+          if k != skip_track {
+            pass_dirty[k][i] = true
+          }
+        }
+      }
+    }
+  }
+
+  fn has_any_dirty(track_id : Int32) -> Bool {
+    if track_id < 0 || track_id >= num_dirty_tracks {
+      return true
+    }
+    for b in pass_dirty[track_id] {
+      if b {
+        return true
+      }
+    }
+    false
+  }
+
+  fn sync_code_lengths(next_codes : Array[FuncBody]) -> Int32 {
+    let n = next_codes.length()
+    if n == body_lens.length() && n == cur.codes.length() {
+      for i in 0..<n {
+        if !physical_equal(next_codes[i], cur.codes[i]) {
+          body_lens[i] = encode_func_body(next_codes[i]).length()
+        }
+      }
+    } else {
+      body_lens = next_codes.map(fb => encode_func_body(fb).length())
+    }
+    prefix_len + code_section_total_len(body_lens) + suffix_len
+  }
+
+  fn mark_codes_changed_vs_cur(next_codes : Array[FuncBody]) -> Unit {
+    let n = next_codes.length()
+    if n != cur.codes.length() {
+      reset_all_dirty(n)
+      return
+    }
+    let mask = Array::makei(n, i => !physical_equal(next_codes[i], cur.codes[i]))
+    propagate_dirty(-1, mask)
+  }
+
+  fn run_code_pass(
     name : String,
     round : Int32,
     f : (WasmModule) -> WasmModule,
   ) -> Bool {
     let next = f(cur)
-    let encoded = encode_module(next)
-    let next_len = encoded.length()
-    let saved = cur_len - next_len
-    let changed = next != cur
-    if changed || saved != 0 {
-      passes.push({
-        name,
-        round,
-        before_bytes: cur_len,
-        after_bytes: next_len,
-        saved_bytes: saved,
-        saved_pct: pct_of(saved, before_bytes),
-      })
-      cur = next
-      cur_bytes = encoded
-      cur_len = next_len
-      true
-    } else {
-      false
+    if physical_equal(next, cur) {
+      return false
     }
+    mark_codes_changed_vs_cur(next.codes)
+    let next_len = sync_code_lengths(next.codes)
+    let saved = cur_len - next_len
+    passes.push({
+      name,
+      round,
+      before_bytes: cur_len,
+      after_bytes: next_len,
+      saved_bytes: saved,
+      saved_pct: pct_of(saved, before_bytes),
+    })
+    cur = next
+    cur_len = next_len
+    true
+  }
+
+  fn run_dirty_pass(
+    name : String,
+    round : Int32,
+    track_id : Int32,
+    f : (WasmModule, Array[Bool]?) -> (WasmModule, Array[Bool]),
+  ) -> Bool {
+    if !has_any_dirty(track_id) {
+      return false
+    }
+    let work = pass_dirty[track_id]
+    let (next, changed_mask) = f(cur, Some(work))
+    pass_dirty[track_id] = Array::make(next.codes.length(), false)
+    if physical_equal(next, cur) {
+      return false
+    }
+    propagate_dirty(track_id, changed_mask)
+    let next_len = sync_code_lengths(next.codes)
+    let saved = cur_len - next_len
+    passes.push({
+      name,
+      round,
+      before_bytes: cur_len,
+      after_bytes: next_len,
+      saved_bytes: saved,
+      saved_pct: pct_of(saved, before_bytes),
+    })
+    cur = next
+    cur_len = next_len
+    true
+  }
+
+  fn run_module_pass(
+    name : String,
+    round : Int32,
+    codes_may_change : Bool,
+    f : (WasmModule) -> WasmModule,
+  ) -> Bool {
+    let next = f(cur)
+    if physical_equal(next, cur) || next == cur {
+      return false
+    }
+    if codes_may_change {
+      reset_all_dirty(next.codes.length())
+    }
+    prefix_len = encode_non_code_prefix_len(next)
+    suffix_len = encode_non_code_suffix_len(next)
+    let next_len = if codes_may_change {
+      sync_code_lengths(next.codes)
+    } else {
+      prefix_len + code_section_total_len(body_lens) + suffix_len
+    }
+    let saved = cur_len - next_len
+    passes.push({
+      name,
+      round,
+      before_bytes: cur_len,
+      after_bytes: next_len,
+      saved_bytes: saved,
+      saved_pct: pct_of(saved, before_bytes),
+    })
+    cur = next
+    cur_len = next_len
+    true
   }
 
   // One-shot strip custom sections first (so size breakdown cleanly separates metadata vs bytecode passes)
   if config.strip_custom {
     ignore(
-      run_pass("strip-custom", 1, m => {
+      run_module_pass("strip-custom", 1, false, m => {
         pass_strip_custom(m, keep_names=config.keep_names)
       }),
     )
@@ -283,76 +425,96 @@ pub fn optimize_bytes(
     let round_start_len = cur_len
     let mut any_change = false
     if config.enable_dedup_types {
-      if run_pass("dedup-types", round, pass_dedup_types) {
+      if run_module_pass("dedup-types", round, true, pass_dedup_types) {
         any_change = true
       }
     }
     if config.enable_const_globals {
-      if run_pass("const-globals", round, m => {
+      if run_code_pass("const-globals", round, m => {
           pass_const_globals(m, prefer_speed~)
         }) {
         any_change = true
       }
     }
+    if config.enable_write_only_globals {
+      if run_code_pass("write-only-globals", round, pass_write_only_globals) {
+        any_change = true
+      }
+    }
     if config.enable_dae {
-      if run_pass("dae", round, pass_dae) {
+      if run_module_pass("dae", round, true, pass_dae) {
+        any_change = true
+      }
+    }
+    if config.enable_simd {
+      if run_dirty_pass("simd-opt", round, 0, pass_opt_simd_dirty) {
         any_change = true
       }
     }
     if config.enable_peephole {
-      if run_pass("const-fold+peephole", round, pass_peephole) {
+      if run_dirty_pass("const-fold+peephole", round, 1, pass_peephole_dirty) {
         any_change = true
       }
     }
     if config.enable_wasmgc {
-      if run_pass("wasmgc-opt", round, pass_wasmgc_opt) {
+      if run_dirty_pass("wasmgc-opt", round, 2, pass_wasmgc_opt_dirty) {
+        any_change = true
+      }
+    }
+    if config.enable_code_folding {
+      if run_dirty_pass("code-folding", round, 3, pass_code_folding_dirty) {
         any_change = true
       }
     }
     if config.enable_simplify_cfg {
-      if run_pass("simplify-cfg", round, pass_simplify_cfg) {
+      if run_dirty_pass("simplify-cfg", round, 4, pass_simplify_cfg_dirty) {
         any_change = true
       }
     }
     if config.enable_dce {
-      if run_pass("dce-instr", round, pass_dce_instr) {
+      if run_dirty_pass("dce-instr", round, 5, pass_dce_instr_dirty) {
         any_change = true
       }
     }
     if config.enable_liveness {
-      if run_pass("local-dse", round, pass_local_dse) {
+      if run_dirty_pass("local-dse", round, 6, pass_local_dse_dirty) {
         any_change = true
         if config.enable_peephole {
-          ignore(run_pass("const-fold+peephole", round, pass_peephole))
+          ignore(
+            run_dirty_pass("const-fold+peephole", round, 1, pass_peephole_dirty),
+          )
         }
       }
     }
     if config.enable_coalesce {
-      if run_pass("coalesce-locals", round, pass_coalesce_locals) {
+      if run_dirty_pass("coalesce-locals", round, 7, pass_coalesce_locals_dirty) {
         any_change = true
         if config.enable_peephole {
-          ignore(run_pass("const-fold+peephole", round, pass_peephole))
+          ignore(
+            run_dirty_pass("const-fold+peephole", round, 1, pass_peephole_dirty),
+          )
         }
       }
     }
     if config.enable_locals {
-      if run_pass("local-opt", round, pass_local_opt) {
+      if run_dirty_pass("local-opt", round, 8, pass_local_opt_dirty) {
         any_change = true
       }
     }
     if config.enable_module_dce {
-      if run_pass("module-dce", round, pass_module_dce) {
+      if run_module_pass("module-dce", round, true, pass_module_dce) {
         any_change = true
       }
     }
-    if config.enable_icf {
-      if run_pass("merge-funcs (ICF)", round, pass_merge_funcs) {
+    if config.enable_icf && icf_needed {
+      icf_needed = false
+      if run_module_pass("merge-funcs (ICF)", round, true, pass_merge_funcs) {
         any_change = true
       }
     }
     // Inline AFTER ICF so identical single-use helpers merge before being inlined, then immediately clean up dead callees
     if config.enable_inline {
-      if run_pass("inline", round, m => {
+      if run_code_pass("inline", round, m => {
           pass_inline(
             m,
             prefer_speed~,
@@ -362,30 +524,41 @@ pub fn optimize_bytes(
         }) {
         any_change = true
         if config.enable_peephole {
-          ignore(run_pass("const-fold+peephole", round, pass_peephole))
+          ignore(
+            run_dirty_pass("const-fold+peephole", round, 1, pass_peephole_dirty),
+          )
         }
         if config.enable_wasmgc {
-          ignore(run_pass("wasmgc-opt", round, pass_wasmgc_opt))
+          ignore(run_dirty_pass("wasmgc-opt", round, 2, pass_wasmgc_opt_dirty))
+        }
+        if config.enable_code_folding {
+          ignore(
+            run_dirty_pass("code-folding", round, 3, pass_code_folding_dirty),
+          )
         }
         if config.enable_simplify_cfg {
-          ignore(run_pass("simplify-cfg", round, pass_simplify_cfg))
+          ignore(
+            run_dirty_pass("simplify-cfg", round, 4, pass_simplify_cfg_dirty),
+          )
         }
         if config.enable_dce {
-          ignore(run_pass("dce-instr", round, pass_dce_instr))
+          ignore(run_dirty_pass("dce-instr", round, 5, pass_dce_instr_dirty))
         }
         if config.enable_liveness {
-          ignore(run_pass("local-dse", round, pass_local_dse))
+          ignore(run_dirty_pass("local-dse", round, 6, pass_local_dse_dirty))
         }
         if config.enable_locals {
-          ignore(run_pass("local-opt", round, pass_local_opt))
+          ignore(run_dirty_pass("local-opt", round, 8, pass_local_opt_dirty))
         }
         if config.enable_module_dce {
-          ignore(run_pass("module-dce", round, pass_module_dce))
+          ignore(run_module_pass("module-dce", round, true, pass_module_dce))
         }
       }
     }
-    if config.enable_opt_data {
-      if run_pass("opt-data", round, m => pass_opt_data(m, allow_split=true)) {
+    if config.enable_opt_data && round == 1 {
+      if run_module_pass("opt-data", round, false, m => {
+          pass_opt_data(m, allow_split=true)
+        }) {
         any_change = true
       }
     }
@@ -394,8 +567,8 @@ pub fn optimize_bytes(
     }
   }
 
-  // Final output: if pipeline made zero changes and encoded length wasn't smaller, preserve original bytes when unchanged
-  let final_bytes = if passes.is_empty() { bytes } else { cur_bytes }
+  // Encode full optimized module ONCE at the very end (preserving original bytes if zero passes triggered)
+  let final_bytes = if passes.is_empty() { bytes } else { encode_module(cur) }
   let after_bytes = final_bytes.length()
   let saved_bytes = before_bytes - after_bytes
 

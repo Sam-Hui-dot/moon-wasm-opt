@@ -5,25 +5,68 @@ fn normalize_self_calls(
 ) -> Array[Instr] {
   let sentinel = 0xFFFF_FFFFU
   let out : Array[Instr] = []
+  let mut changed = false
   for ins in instrs {
     let rw : Instr = match ins {
-      Call(f) => Call(if f == self_idx { sentinel } else { f })
-      ReturnCall(f) => ReturnCall(if f == self_idx { sentinel } else { f })
-      RefFunc(f) => RefFunc(if f == self_idx { sentinel } else { f })
-      Block(bt, b) => Block(bt, normalize_self_calls(b, self_idx))
-      Loop(bt, b) => Loop(bt, normalize_self_calls(b, self_idx))
-      If(bt, t, e) =>
-        If(
-          bt,
-          normalize_self_calls(t, self_idx),
-          normalize_self_calls(e, self_idx),
-        )
-      TryTable(bt, c, b) => TryTable(bt, c, normalize_self_calls(b, self_idx))
+      Call(f) =>
+        if f == self_idx {
+          changed = true
+          Call(sentinel)
+        } else {
+          ins
+        }
+      ReturnCall(f) =>
+        if f == self_idx {
+          changed = true
+          ReturnCall(sentinel)
+        } else {
+          ins
+        }
+      RefFunc(f) =>
+        if f == self_idx {
+          changed = true
+          RefFunc(sentinel)
+        } else {
+          ins
+        }
+      Block(bt, b) => {
+        let nb = normalize_self_calls(b, self_idx)
+        if !physical_equal(nb, b) {
+          changed = true
+        }
+        Block(bt, nb)
+      }
+      Loop(bt, b) => {
+        let nb = normalize_self_calls(b, self_idx)
+        if !physical_equal(nb, b) {
+          changed = true
+        }
+        Loop(bt, nb)
+      }
+      If(bt, t, e) => {
+        let nt = normalize_self_calls(t, self_idx)
+        let ne = normalize_self_calls(e, self_idx)
+        if !physical_equal(nt, t) || !physical_equal(ne, e) {
+          changed = true
+        }
+        If(bt, nt, ne)
+      }
+      TryTable(bt, c, b) => {
+        let nb = normalize_self_calls(b, self_idx)
+        if !physical_equal(nb, b) {
+          changed = true
+        }
+        TryTable(bt, c, nb)
+      }
       other => other
     }
     out.push(rw)
   }
-  out
+  if !changed {
+    instrs
+  } else {
+    out
+  }
 }
 
 ///|

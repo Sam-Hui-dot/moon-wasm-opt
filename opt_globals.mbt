@@ -170,11 +170,146 @@ pub fn pass_const_globals(
   }
 
   let new_codes : Array[FuncBody] = []
+  let mut changed = false
   for fb in mod.codes {
-    new_codes.push({
-      locals: fb.locals,
-      body: replace_global_gets_in_instrs(fb.body, repl),
-    })
+    let nb = replace_global_gets_in_instrs(fb.body, repl)
+    if nb != fb.body {
+      changed = true
+      new_codes.push({ locals: fb.locals, body: nb, })
+    } else {
+      new_codes.push(fb)
+    }
   }
-  { ..mod, codes: new_codes, }
+  if !changed {
+    mod
+  } else {
+    { ..mod, codes: new_codes, }
+  }
+}
+
+///|
+fn replace_write_only_global_sets(
+  instrs : Array[Instr],
+  dead_globals : Set[UInt32],
+) -> Array[Instr] {
+  let out : Array[Instr] = []
+  let mut changed = false
+  for ins in instrs {
+    match ins {
+      GlobalSet(g) if dead_globals.contains(g) => {
+        changed = true
+        out.push(Drop)
+      }
+      Block(bt, b) => {
+        let nb = replace_write_only_global_sets(b, dead_globals)
+        if !physical_equal(nb, b) {
+          changed = true
+        }
+        out.push(Block(bt, nb))
+      }
+      Loop(bt, b) => {
+        let nb = replace_write_only_global_sets(b, dead_globals)
+        if !physical_equal(nb, b) {
+          changed = true
+        }
+        out.push(Loop(bt, nb))
+      }
+      If(bt, t, e) => {
+        let nt = replace_write_only_global_sets(t, dead_globals)
+        let ne = replace_write_only_global_sets(e, dead_globals)
+        if !physical_equal(nt, t) || !physical_equal(ne, e) {
+          changed = true
+        }
+        out.push(If(bt, nt, ne))
+      }
+      TryTable(bt, cs, b) => {
+        let nb = replace_write_only_global_sets(b, dead_globals)
+        if !physical_equal(nb, b) {
+          changed = true
+        }
+        out.push(TryTable(bt, cs, nb))
+      }
+      other => out.push(other)
+    }
+  }
+  if !changed {
+    instrs
+  } else {
+    out
+  }
+}
+
+///|
+/// Pass 16: Replace `global.set` on unexported internal mutable globals that have zero `global.get` reads
+/// anywhere in the module with `drop`, unlocking subsequent peephole and `module-dce` removal.
+pub fn pass_write_only_globals(mod : WasmModule) -> WasmModule {
+  if mod.globals.is_empty() || mod.codes.is_empty() {
+    return mod
+  }
+  let imp_globals = mod.imported_global_count()
+  let exported : Set[UInt32] = Set([])
+  for exp in mod.exports {
+    if exp.kind == Global {
+      exported.add(exp.idx)
+    }
+  }
+
+  let all_gets : Map[UInt32, Int32] = Map([])
+  for fb in mod.codes {
+    count_global_gets_in_instrs(fb.body, all_gets)
+  }
+  for tt in mod.tables {
+    match tt.init_expr {
+      Some(ex) => count_global_gets_in_instrs(ex, all_gets)
+      None => ()
+    }
+  }
+  for gd in mod.globals {
+    count_global_gets_in_instrs(gd.init, all_gets)
+  }
+  for el in mod.elements {
+    match el.offset {
+      Some(ex) => count_global_gets_in_instrs(ex, all_gets)
+      None => ()
+    }
+    for ex in el.init_exprs {
+      count_global_gets_in_instrs(ex, all_gets)
+    }
+  }
+  for ds in mod.datas {
+    match ds.offset {
+      Some(ex) => count_global_gets_in_instrs(ex, all_gets)
+      None => ()
+    }
+  }
+
+  let write_only : Set[UInt32] = Set([])
+  for i, gd in mod.globals {
+    let gidx = imp_globals + i.reinterpret_as_uint()
+    if gd.global_type.mutable &&
+      !exported.contains(gidx) &&
+      all_gets.get(gidx).unwrap_or(0) == 0 {
+      write_only.add(gidx)
+    }
+  }
+  if write_only.is_empty() {
+    return mod
+  }
+
+  let new_codes : Array[FuncBody] = []
+  let mut changed = false
+  for fb in mod.codes {
+    let nb = replace_write_only_global_sets(fb.body, write_only)
+    if !physical_equal(nb, fb.body) {
+      changed = true
+      new_codes.push({ locals: fb.locals, body: nb, })
+    } else {
+      new_codes.push(fb)
+    }
+  }
+  if !changed {
+    mod
+  } else {
+    { ..mod, codes: new_codes, }
+  }
 }

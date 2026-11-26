@@ -61,6 +61,23 @@ fn lex_cmp_str(a : String, b : String) -> Int32 {
 }
 
 ///|
+fn def_param_count(
+  mod : WasmModule,
+  def_i : Int32,
+  flat_types : Array[SubType],
+) -> UInt32 {
+  let tidx = mod.func_types[def_i].reinterpret_as_int()
+  if tidx >= 0 && tidx < flat_types.length() {
+    match flat_types[tidx].comp {
+      Func(params, _) => params.length().reinterpret_as_uint()
+      _ => 0U
+    }
+  } else {
+    0U
+  }
+}
+
+///|
 fn optimize_func_locals(fb : FuncBody, param_count : UInt32) -> FuncBody {
   if fb.locals.is_empty() {
     return fb
@@ -166,6 +183,9 @@ fn optimize_func_locals(fb : FuncBody, param_count : UInt32) -> FuncBody {
   } else {
     fb.body
   }
+  if !changed && new_groups == fb.locals {
+    return fb
+  }
   let candidate : FuncBody = { locals: new_groups, body: new_body, }
   if encode_func_body(candidate).length() < encode_func_body(fb).length() {
     candidate
@@ -175,14 +195,41 @@ fn optimize_func_locals(fb : FuncBody, param_count : UInt32) -> FuncBody {
 }
 
 ///|
+fn pass_local_opt_dirty(
+  mod : WasmModule,
+  dirty : Array[Bool]?,
+) -> (WasmModule, Array[Bool]) {
+  let out_changed : Array[Bool] = Array::make(mod.codes.length(), false)
+  let flat_types = mod.flat_types()
+  let new_codes : Array[FuncBody] = []
+  let mut changed = false
+  for i, fb in mod.codes {
+    let run = match dirty {
+      Some(d) => d[i]
+      None => true
+    }
+    if run {
+      let pcnt = def_param_count(mod, i, flat_types)
+      let opt = optimize_func_locals(fb, pcnt)
+      if !physical_equal(opt, fb) && opt != fb {
+        changed = true
+        out_changed[i] = true
+        new_codes.push(opt)
+        continue
+      }
+    }
+    new_codes.push(fb)
+  }
+  if !changed {
+    (mod, out_changed)
+  } else {
+    ({ ..mod, codes: new_codes, }, out_changed)
+  }
+}
+
+///|
 /// Pass 4: Remove unused locals, prioritize hot locals into 1-byte LEB128 slots, and coalesce LocalGroups by type.
 pub fn pass_local_opt(mod : WasmModule) -> WasmModule {
-  let imp_cnt = mod.imported_func_count()
-  let new_codes : Array[FuncBody] = []
-  for i, fb in mod.codes {
-    let fidx = imp_cnt + i.reinterpret_as_uint()
-    let pcnt = mod.func_param_count(fidx)
-    new_codes.push(optimize_func_locals(fb, pcnt))
-  }
-  { ..mod, codes: new_codes, }
+  let (next, _) = pass_local_opt_dirty(mod, None)
+  next
 }

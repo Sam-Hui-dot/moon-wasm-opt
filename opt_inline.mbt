@@ -384,7 +384,7 @@ pub fn pass_inline(
 
   for i, fb in mod.codes {
     let caller_fidx = imp_funcs + i.reinterpret_as_uint()
-    let caller_param_count = mod.func_param_count(caller_fidx)
+    let caller_param_count = def_param_count(mod, i, flat_types)
     let caller_locals = expand_local_types(fb.locals)
     let mut added_instrs = 0
     let mut changed_caller = false

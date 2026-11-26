@@ -1,0 +1,7 @@
+/_build/
+/.mooncakes/
+/demo/out/
+/demo/kernel_fixture/_build/
+/demo/kernel_fixture/.mooncakes/
+/docs/moon-wasm-opt.js
+/docs/samples.js

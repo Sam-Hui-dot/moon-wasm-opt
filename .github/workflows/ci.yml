@@ -56,14 +56,14 @@ jobs:
         run: |
           WS="$RUNNER_TEMP/moon-wasm-opt-consumer"
           mkdir -p "$WS/library" "$WS/consumer"
-          cp moon.mod moon.pkg types.mbt leb128.mbt decoder.mbt encoder.mbt wat.mbt analyze.mbt opt_peephole.mbt opt_locals.mbt opt_module.mbt opt_icf.mbt opt_globals.mbt opt_data.mbt opt_cfg.mbt opt_inline.mbt pipeline.mbt "$WS/library/"
+          cp moon.mod moon.pkg types.mbt leb128.mbt decoder.mbt encoder.mbt wat.mbt analyze.mbt opt_peephole.mbt opt_locals.mbt opt_module.mbt opt_icf.mbt opt_globals.mbt opt_data.mbt opt_cfg.mbt opt_inline.mbt opt_liveness.mbt opt_wasmgc.mbt opt_dae.mbt pipeline.mbt "$WS/library/"
           printf 'members = ["library", "consumer"]\n' > "$WS/moon.work"
           cat > "$WS/consumer/moon.mod" << 'EOF'
           name = "consumer/wasm-opt-check"
-          version = "0.2.0"
+          version = "0.3.0"
 
           import {
-            "Sam-Hui-dot/moon-wasm-opt@0.2.0",
+            "Sam-Hui-dot/moon-wasm-opt@0.3.0",
           }
           EOF
           cat > "$WS/consumer/moon.pkg" << 'EOF'
@@ -124,3 +124,8 @@ jobs:
         run: |
           python3 demo/verify_oracle.py
           cat demo/out/oracle-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Run official WebAssembly spec/test/core + GC regression oracle
+        run: |
+          git clone --depth 1 https://github.com/WebAssembly/spec.git "$RUNNER_TEMP/wasm-spec"
+          python3 demo/verify_spec.py --spec-dir "$RUNNER_TEMP/wasm-spec"
+          cat demo/out/spec-summary.md >> "$GITHUB_STEP_SUMMARY"

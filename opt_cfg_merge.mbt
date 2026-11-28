@@ -1,11 +1,16 @@
 ///|
 /// Pass 20: Structured Block Merging, Unused Block/Loop Unwrapping,
 /// Trailing Redundant `br 0` Removal, and Identical `If/Else` Branch Folding.
-fn strip_trailing_br0(body : Array[Instr]) -> Array[Instr] {
-  if !body.is_empty() && body[body.length() - 1] == Br(0U) {
-    Array::makei(body.length() - 1, i => body[i])
-  } else {
-    body
+fn strip_trailing_br0(bt : BlockType, body : Array[Instr]) -> Array[Instr] {
+  if body.is_empty() || body[body.length() - 1] != Br(0U) {
+    return body
+  }
+  // Only strip trailing `br 0` when exact stack arity is guaranteed (never after arbitrary
+  // multi-instruction sequences where `br 0` may unwind extra values off the operand stack).
+  match bt {
+    Empty if body.length() == 1 => []
+    Val(_) if body.length() == 2 && is_pure_single_push(body[0]) => [body[0]]
+    _ => body
   }
 }
 
@@ -21,8 +26,8 @@ fn cfg_merge_seq(instrs : Array[Instr]) -> Array[Instr] {
         if !physical_equal(nb, body) {
           changed = true
         }
-        // 1. Strip redundant trailing `br 0` at the end of a Block
-        let stripped = strip_trailing_br0(nb)
+        // 1. Strip redundant trailing `br 0` at the end of a Block (stack-arity-safe)
+        let stripped = strip_trailing_br0(bt, nb)
         if !physical_equal(stripped, nb) {
           changed = true
           nb = stripped
@@ -77,13 +82,13 @@ fn cfg_merge_seq(instrs : Array[Instr]) -> Array[Instr] {
         if !physical_equal(nt, then_b) || !physical_equal(ne, else_b) {
           changed = true
         }
-        // Strip redundant trailing `br 0` inside then/else branches
-        let nt2 = strip_trailing_br0(nt)
+        // Strip redundant trailing `br 0` inside then/else branches (stack-arity-safe)
+        let nt2 = strip_trailing_br0(bt, nt)
         if !physical_equal(nt2, nt) {
           changed = true
           nt = nt2
         }
-        let ne2 = strip_trailing_br0(ne)
+        let ne2 = strip_trailing_br0(bt, ne)
         if !physical_equal(ne2, ne) {
           changed = true
           ne = ne2

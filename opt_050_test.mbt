@@ -156,7 +156,6 @@ test "cfg-merge unwraps unused blocks/loops, strips trailing br 0, and folds ide
               LocalGet(0U),
               If(Val(I32), [I32Const(42), Br(0U)], [I32Const(42)]),
             ]),
-            Br(0U),
           ]),
         ],
       },

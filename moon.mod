@@ -1,6 +1,6 @@
 name = "Sam-Hui-dot/moon-wasm-opt"
 
-version = "0.5.0"
+version = "0.5.1"
 
 license = "Apache-2.0"
 

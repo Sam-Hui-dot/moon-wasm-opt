@@ -60,10 +60,10 @@ jobs:
           printf 'members = ["library", "consumer"]\n' > "$WS/moon.work"
           cat > "$WS/consumer/moon.mod" << 'EOF'
           name = "consumer/wasm-opt-check"
-          version = "0.5.0"
+          version = "0.5.1"
 
           import {
-            "Sam-Hui-dot/moon-wasm-opt@0.5.0",
+            "Sam-Hui-dot/moon-wasm-opt@0.5.1",
           }
           EOF
           cat > "$WS/consumer/moon.pkg" << 'EOF'

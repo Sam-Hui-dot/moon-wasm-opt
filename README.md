@@ -2,7 +2,7 @@
 
 [![Live Browser Playground](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages%20(Zero%20Upload)-047857?style=for-the-badge)](https://sam-hui-dot.github.io/moon-wasm-opt/)
 [![CI](https://github.com/Sam-Hui-dot/moon-wasm-opt/actions/workflows/ci.yml/badge.svg)](https://github.com/Sam-Hui-dot/moon-wasm-opt/actions/workflows/ci.yml)
-[![Mooncakes](https://img.shields.io/badge/mooncakes-Sam--Hui--dot%2Fmoon--wasm--opt%400.5.0-orange)](https://mooncakes.io/docs/Sam-Hui-dot/moon-wasm-opt%400.5.0)
+[![Mooncakes](https://img.shields.io/badge/mooncakes-Sam--Hui--dot%2Fmoon--wasm--opt%400.5.1-orange)](https://mooncakes.io/docs/Sam-Hui-dot/moon-wasm-opt%400.5.1)
 
 纯 MoonBit 实现的 **WebAssembly 2.0 与 WasmGC 二进制优化器、WAT 反汇编器、体积 Treemap 剖析器与零上传浏览器在线优化工作台**（零 C++ Binaryen 依赖）。
 

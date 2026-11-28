@@ -27,7 +27,11 @@ pub fn opt_config(level? : OptLevel, converge? : Bool, max_rounds? : Int32, stri
 
 pub fn optimize_bytes(Bytes, config? : OptConfig) -> (Bytes, OptReport) raise WasmError
 
+pub fn pass_cfg_merge(WasmModule) -> WasmModule
+
 pub fn pass_coalesce_locals(WasmModule) -> WasmModule
+
+pub fn pass_code_folding(WasmModule) -> WasmModule
 
 pub fn pass_const_globals(WasmModule, prefer_speed? : Bool) -> WasmModule
 
@@ -39,6 +43,8 @@ pub fn pass_dedup_types(WasmModule) -> WasmModule
 
 pub fn pass_inline(WasmModule, prefer_speed? : Bool, max_multi_instrs? : Int32, max_single_instrs? : Int32) -> WasmModule
 
+pub fn pass_local_cse(WasmModule) -> WasmModule
+
 pub fn pass_local_dse(WasmModule) -> WasmModule
 
 pub fn pass_local_opt(WasmModule) -> WasmModule
@@ -49,13 +55,19 @@ pub fn pass_module_dce(WasmModule) -> WasmModule
 
 pub fn pass_opt_data(WasmModule, allow_split? : Bool) -> WasmModule
 
+pub fn pass_opt_simd(WasmModule) -> WasmModule
+
 pub fn pass_peephole(WasmModule) -> WasmModule
 
 pub fn pass_simplify_cfg(WasmModule) -> WasmModule
 
 pub fn pass_strip_custom(WasmModule, keep_names? : Bool) -> WasmModule
 
+pub fn pass_wasmgc_gufa(WasmModule) -> WasmModule
+
 pub fn pass_wasmgc_opt(WasmModule) -> WasmModule
+
+pub fn pass_write_only_globals(WasmModule) -> WasmModule
 
 pub fn rebuild_name_custom_section(WasmModule) -> Array[CustomSection]
 
@@ -455,6 +467,12 @@ pub(all) struct OptConfig {
   enable_module_dce : Bool
   enable_icf : Bool
   enable_opt_data : Bool
+  enable_code_folding : Bool
+  enable_write_only_globals : Bool
+  enable_simd : Bool
+  enable_wasmgc_gufa : Bool
+  enable_local_cse : Bool
+  enable_cfg_merge : Bool
 }
 pub fn OptConfig::equal(Self, Self) -> Bool
 pub fn OptConfig::not_equal(Self, Self) -> Bool

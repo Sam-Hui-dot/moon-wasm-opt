@@ -2,7 +2,7 @@
 
 [![Live Browser Playground](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages%20(Zero%20Upload)-047857?style=for-the-badge)](https://sam-hui-dot.github.io/moon-wasm-opt/)
 [![CI](https://github.com/Sam-Hui-dot/moon-wasm-opt/actions/workflows/ci.yml/badge.svg)](https://github.com/Sam-Hui-dot/moon-wasm-opt/actions/workflows/ci.yml)
-[![Mooncakes](https://img.shields.io/badge/mooncakes-Sam--Hui--dot%2Fmoon--wasm--opt%400.4.0-orange)](https://mooncakes.io/docs/Sam-Hui-dot/moon-wasm-opt%400.4.0)
+[![Mooncakes](https://img.shields.io/badge/mooncakes-Sam--Hui--dot%2Fmoon--wasm--opt%400.5.0-orange)](https://mooncakes.io/docs/Sam-Hui-dot/moon-wasm-opt%400.5.0)
 
 纯 MoonBit 实现的 **WebAssembly 2.0 与 WasmGC 二进制优化器、WAT 反汇编器、体积 Treemap 剖析器与零上传浏览器在线优化工作台**（零 C++ Binaryen 依赖）。
 
@@ -16,12 +16,16 @@ MoonBit 官方工具链自带一个约 10 MB 的本地 C++ Binaryen 二进制（
 - **内置可观测性与零上传工作台**：同一份纯 MoonBit 引擎提供二进制体积账单、SVG Treemap、17-Pass 减重瀑布图、符号化 WAT 反汇编与浏览器端零上传实时 `WebAssembly.validate()`；
 - **执行速度与诚实边界**：`0.4.0` 通过位集合 `LocalBitSet` 活跃分析与脏标记按函数增量编码，在 GitHub Actions Ubuntu CI 上 4 份真实 MoonBit `--release` 产物耗时全面快于 Binaryen `v133`；剩余压缩率差距与演进路线详见 [docs/known-gaps.md](docs/known-gaps.md)。
 
-## 核心能力（`0.4.0`）
+## 核心能力（`0.5.0`）
 
 - **完整的 Wasm 2.0 + WasmGC 无损二进制编解码器**（`types.mbt`, `leb128.mbt`, `decoder.mbt`, `encoder.mbt`）
   - 覆盖全部 13 个标准段（含 WasmGC `rec` / `sub` / `sub final` / `struct` / `array` / `func` 复合类型、`Tag`、`DataCount`、全部 8 种 `Element` 与 3 种 `Data` 段形态）与自定义段（含 `name` 符号表解析与同步重编码）；
   - 覆盖核心控制流、变量、表、内存、数值、引用、`0xFC` bulk-memory / 饱和转换、`0xFB` WasmGC（`struct.*` / `array.*` / `ref.test` / `ref.cast` / `br_on_cast` / `i31`）、`try_table` 异常处理与 `0xFD` SIMD 指令。
-- **17 个编译优化 Pass 与脏标记增量收敛管线（`-O1` / `-O2` / `-Os` / `-Oz --converge`）**
+- **20 个编译优化 Pass 与脏标记增量收敛管线（`-O1` / `-O2` / `-Os` / `-Oz --converge`）**
+  - **`0.5.0` 新增三大优化 Pass**：
+    - `wasmgc-gufa`（`opt_wasmgc_gufa.mbt`）：全程序 WasmGC 结构体写后不读尾部字段裁剪与只读可变字段 `mut -> imm` 收紧；
+    - `local-cse`（`opt_cse.mbt`）：基本块内零新增局部变量的 2/3 指令纯表达式公共子表达式复用与内存/字段读转发；
+    - `cfg-merge`（`opt_cfg_merge.mbt`）：无分支 `block`/`loop` 拆壳、尾部冗余 `br 0` 消除、同型嵌套块合并与同构 `if/else` 折叠。
   - **高性能管线底座**：`LocalBitSet` 稠密位矩阵活跃分析与干涉图、按函数脏标记跳过空转 Pass、按变更函数增量计量字节并在收敛结束时仅执行 1 次全模块编码；
   1. `strip-custom`：按需剥离非执行自定义段（支持 `--keep-names` 保留并同步符号名）；
   2. `dedup-types`：严格遵循 WasmGC Iso-Recursive 类型等价规范的同构 `RecGroup` 去重与单元素 `rec` 包装清理；

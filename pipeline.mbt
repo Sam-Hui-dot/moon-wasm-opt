@@ -43,6 +43,9 @@ pub(all) struct OptConfig {
   enable_code_folding : Bool
   enable_write_only_globals : Bool
   enable_simd : Bool
+  enable_wasmgc_gufa : Bool
+  enable_local_cse : Bool
+  enable_cfg_merge : Bool
 }
 
 ///|
@@ -91,6 +94,9 @@ pub fn opt_config(
         enable_code_folding: false,
         enable_write_only_globals: true,
         enable_simd: true,
+        enable_wasmgc_gufa: false,
+        enable_local_cse: true,
+        enable_cfg_merge: true,
       }
     O2 =>
       {
@@ -116,6 +122,9 @@ pub fn opt_config(
         enable_code_folding: true,
         enable_write_only_globals: true,
         enable_simd: true,
+        enable_wasmgc_gufa: true,
+        enable_local_cse: true,
+        enable_cfg_merge: true,
       }
     Os | Oz =>
       {
@@ -141,6 +150,9 @@ pub fn opt_config(
         enable_code_folding: true,
         enable_write_only_globals: true,
         enable_simd: true,
+        enable_wasmgc_gufa: true,
+        enable_local_cse: true,
+        enable_cfg_merge: true,
       }
   }
 }
@@ -241,8 +253,8 @@ pub fn optimize_bytes(
   let mut cur_len = before_bytes
   let passes : Array[PassStats] = []
 
-  // Per-pass dirty function bitmasks (`0..8`) eliminate scanning already-converged functions across cleanup & rounds
-  let num_dirty_tracks = 9
+  // Per-pass dirty function bitmasks (`0..10`) eliminate scanning already-converged functions across cleanup & rounds
+  let num_dirty_tracks = 11
   let pass_dirty : Array[Array[Bool]] = Array::makei(num_dirty_tracks, _ => {
     Array::make(cur.codes.length(), true)
   })
@@ -417,13 +429,18 @@ pub fn optimize_bytes(
   let mut rounds_run = 0
   let prefer_speed = config.level == O2
   let (multi_limit, single_limit) = match config.level {
-    O2 => (14, 96)
-    _ => (6, 80)
+    O2 => (14, 120)
+    _ => (8, 120)
   }
   for round in 1..<=limit {
     rounds_run = round
     let round_start_len = cur_len
     let mut any_change = false
+    if config.enable_wasmgc_gufa {
+      if run_module_pass("wasmgc-gufa", round, true, pass_wasmgc_gufa) {
+        any_change = true
+      }
+    }
     if config.enable_dedup_types {
       if run_module_pass("dedup-types", round, true, pass_dedup_types) {
         any_change = true
@@ -461,6 +478,11 @@ pub fn optimize_bytes(
         any_change = true
       }
     }
+    if config.enable_local_cse {
+      if run_dirty_pass("local-cse", round, 9, pass_local_cse_dirty) {
+        any_change = true
+      }
+    }
     if config.enable_code_folding {
       if run_dirty_pass("code-folding", round, 3, pass_code_folding_dirty) {
         any_change = true
@@ -468,6 +490,11 @@ pub fn optimize_bytes(
     }
     if config.enable_simplify_cfg {
       if run_dirty_pass("simplify-cfg", round, 4, pass_simplify_cfg_dirty) {
+        any_change = true
+      }
+    }
+    if config.enable_cfg_merge {
+      if run_dirty_pass("cfg-merge", round, 10, pass_cfg_merge_dirty) {
         any_change = true
       }
     }
@@ -531,6 +558,9 @@ pub fn optimize_bytes(
         if config.enable_wasmgc {
           ignore(run_dirty_pass("wasmgc-opt", round, 2, pass_wasmgc_opt_dirty))
         }
+        if config.enable_local_cse {
+          ignore(run_dirty_pass("local-cse", round, 9, pass_local_cse_dirty))
+        }
         if config.enable_code_folding {
           ignore(
             run_dirty_pass("code-folding", round, 3, pass_code_folding_dirty),
@@ -540,6 +570,9 @@ pub fn optimize_bytes(
           ignore(
             run_dirty_pass("simplify-cfg", round, 4, pass_simplify_cfg_dirty),
           )
+        }
+        if config.enable_cfg_merge {
+          ignore(run_dirty_pass("cfg-merge", round, 10, pass_cfg_merge_dirty))
         }
         if config.enable_dce {
           ignore(run_dirty_pass("dce-instr", round, 5, pass_dce_instr_dirty))
@@ -666,8 +699,10 @@ pub fn render_opt_waterfall_svg(
         "#d946ef"
       } else if p.name.contains("inline") {
         "#ec4899"
-      } else if p.name.contains("simplify-cfg") {
+      } else if p.name.contains("simplify-cfg") || p.name.contains("cfg-merge") {
         "#f97316"
+      } else if p.name.contains("local-cse") {
+        "#eab308"
       } else if p.name.contains("opt-data") {
         "#14b8a6"
       } else if p.name.contains("const-globals") {
